@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QQ音乐状态</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --qm: #31c27c;
+      --qm-deep: #1f9a64;
+      --qm-mid: #2ab06f;
+      --text: #163528;
+      --muted: #6d8578;
+      --soft: #e8f7ef;
+      --line: rgba(49, 194, 124, 0.16);
+      --tile-bg: linear-gradient(165deg, #ffffff 0%, #f7fcf9 55%, #eef8f3 100%);
+      --tile-shadow: 0 6px 16px rgba(26, 100, 70, 0.07);
+    }
+
+    html, body {
+      width: fit-content;
+      height: fit-content;
+      min-width: 0;
+      min-height: 0;
+      margin: 0;
+      padding: 0;
+      /* QQ 常把透明区填白，用不透明浅绿底避免白框 */
+      background: #e6f6ee !important;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: geometricPrecision;
+    }
+
+    .page {
+      display: block;
+      width: fit-content;
+      margin: 0;
+      padding: 16px;
+      background: #e6f6ee;
+    }
+
+    .card {
+      width: 510px;
+      border-radius: 28px;
+      overflow: hidden;
+      position: relative;
+      isolation: isolate;
+      background: linear-gradient(160deg, #f7fcf9 0%, #eef8f3 46%, #e3f4eb 100%);
+      border: 1px solid rgba(49, 194, 124, 0.18);
+      box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.85) inset,
+        0 14px 28px rgba(20, 90, 58, 0.12);
+    }
+
+    .hero {
+      padding: 28px 26px 22px;
+      /* 顶部两角与卡片同圆角 */
+      border-radius: 28px 28px 0 0;
+      background:
+        radial-gradient(circle at 92% 12%, rgba(255,255,255,0.28) 0%, transparent 38%),
+        radial-gradient(circle at 8% 88%, rgba(0,0,0,0.06) 0%, transparent 40%),
+        linear-gradient(135deg, #34c27e 0%, #2ab06f 52%, #1fa968 100%);
+      color: #fff;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .brand { min-width: 0; flex: 1; }
+
+    .eyebrow {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2.4px;
+      opacity: 0.84;
+    }
+
+    .username {
+      margin-top: 8px;
+      font-size: 26px;
+      font-weight: 800;
+      line-height: 1.2;
+      word-break: break-all;
+      text-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    }
+
+    .subline {
+      margin-top: 7px;
+      font-size: 13px;
+      font-weight: 500;
+      opacity: 0.9;
+      line-height: 1.4;
+    }
+
+    .avatar-box {
+      position: relative;
+      width: 88px;
+      height: 88px;
+      flex: 0 0 auto;
+    }
+
+    .avatar-ring {
+      width: 88px;
+      height: 88px;
+      border-radius: 50%;
+      padding: 3px;
+      background: linear-gradient(145deg, rgba(255,255,255,0.55), rgba(255,255,255,0.22));
+      box-shadow: 0 10px 22px rgba(0, 0, 0, 0.14);
+    }
+
+    .avatar-inner {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      overflow: hidden;
+      background: #fff;
+      border: 2px solid #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .avatar {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      padding: 11px;
+      display: block;
+    }
+    .avatar.is-photo {
+      object-fit: cover;
+      padding: 0;
+    }
+
+    .status-dot {
+      position: absolute;
+      right: 1px;
+      bottom: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2.5px solid #fff;
+      background: #9aada2;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.14);
+    }
+    .status-dot.on { background: #22c55e; }
+
+    .body {
+      padding: 18px 18px 16px;
+    }
+
+    /* 统一「独立圆角小框」语言 */
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--tile-bg);
+      box-shadow: var(--tile-shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .tile::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: linear-gradient(180deg, var(--qm) 0%, var(--qm-deep) 100%);
+      opacity: 0.85;
+      border-radius: 3px 0 0 3px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .cell {
+      min-height: 76px;
+      padding: 13px 14px 12px 16px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin-bottom: 7px;
+    }
+
+    .value {
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.4;
+      word-break: break-all;
+    }
+
+    .panel {
+      margin-top: 12px;
+      padding: 15px 16px 14px 17px;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, rgba(49,194,124,0.16), rgba(49,194,124,0.08));
+      color: var(--qm-deep);
+      font-size: 13px;
+      font-weight: 800;
+      border: 1px solid rgba(49, 194, 124, 0.18);
+    }
+
+    .state {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .panel-main {
+      margin-top: 10px;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .panel-sub {
+      margin-top: 5px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    /* 底部三项：同一套 tile 框 */
+    .stats {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .stat {
+      padding: 15px 8px 13px;
+      text-align: center;
+    }
+
+    .stat::before {
+      left: 50%;
+      top: 0;
+      bottom: auto;
+      width: 28px;
+      height: 3px;
+      transform: translateX(-50%);
+      border-radius: 0 0 3px 3px;
+      background: linear-gradient(90deg, var(--qm) 0%, var(--qm-deep) 100%);
+    }
+
+    .stat-value {
+      font-size: 21px;
+      font-weight: 800;
+      color: var(--qm-deep);
+      line-height: 1.1;
+      letter-spacing: 0.3px;
+    }
+
+    .stat-label {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+
+    .footer {
+      margin-top: 13px;
+      text-align: center;
+      color: rgba(109, 133, 120, 0.78);
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="card">
+      <div class="hero">
+        <div class="hero-row">
+          <div class="brand">
+            <div class="eyebrow">QQ MUSIC STATUS</div>
+            <div class="username">{{ data.nickname }}</div>
+            <div class="subline">{{ data.subtitle }}</div>
+          </div>
+          <div class="avatar-box">
+            <div class="avatar-ring">
+              <div class="avatar-inner">
+                <img
+                  class="avatar{{ if data.avatarIsPhoto }} is-photo{{ /if }}"
+                  src="{{ data.avatarUrl }}"
+                  alt="avatar"
+                />
+              </div>
+            </div>
+            <div class="status-dot{{ if data.loggedIn }} on{{ /if }}"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="grid">
+          <div class="tile cell">
+            <div class="label">UIN</div>
+            <div class="value">{{ data.uin }}</div>
+          </div>
+          <div class="tile cell">
+            <div class="label">登录方式</div>
+            <div class="value">{{ data.loginTypeText }}</div>
+          </div>
+          <div class="tile cell">
+            <div class="label">API 地址</div>
+            <div class="value">{{ data.apiBase }}</div>
+          </div>
+          <div class="tile cell">
+            <div class="label">Cookie / Key</div>
+            <div class="value">{{ data.keyStatus }}</div>
+          </div>
+        </div>
+
+        <div class="tile panel">
+          <div class="panel-head">
+            <div class="tag">{{ data.vipTitle }}</div>
+            <div class="state">{{ data.vipStateText }}</div>
+          </div>
+          <div class="panel-main">最高解析音质 · {{ data.musicQuality }}</div>
+          <div class="panel-sub">{{ data.vipExpireText }}</div>
+        </div>
+
+        <div class="stats">
+          {{ each data.stats item }}
+          <div class="tile stat">
+            <div class="stat-value">{{ item.value }}</div>
+            <div class="stat-label">{{ item.label }}</div>
+          </div>
+          {{ /each }}
+        </div>
+
+        <div class="footer">{{ data.footer }}</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

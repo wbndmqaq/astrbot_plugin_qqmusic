@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QQ音乐 · 歌曲详情</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --qm: #31c27c;
+      --qm-deep: #1fa968;
+      --text: #143528;
+      --muted: #6a8276;
+      --line: rgba(49, 194, 124, 0.15);
+      --soft: #e9f8f0;
+      --pay: #f08064;
+      --pay-bg: #fdeee9;
+    }
+    html, body {
+      width: fit-content; height: fit-content;
+      min-width: 0; min-height: 0;
+      margin: 0; padding: 0;
+      background: #e6f6ee !important;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    .page { display: block; width: fit-content; margin: 0; padding: 16px; background: #e6f6ee; }
+    .card {
+      width: 480px;
+      border-radius: 24px;
+      overflow: hidden;
+      background: linear-gradient(165deg, #f7fcf9 0%, #eef8f3 42%, #e3f4eb 100%);
+      border: 1px solid rgba(49, 194, 124, 0.18);
+      box-shadow: 0 14px 28px rgba(20, 90, 58, 0.12);
+    }
+
+    /* ── Hero: 封面 + 基本信息 ── */
+    .hero {
+      display: flex;
+      gap: 18px;
+      padding: 24px;
+      background: linear-gradient(135deg, #36c580 0%, #2ab06f 50%, #1fa968 100%);
+      color: #fff;
+    }
+    .cover-wrap {
+      flex-shrink: 0;
+      width: 120px; height: 120px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    }
+    .cover-wrap img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .cover-wrap .ph {
+      width: 100%; height: 100%;
+      background: linear-gradient(135deg, #c6ecd6, #a4ddc1);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; font-weight: 800; color: #fff;
+    }
+    .info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+    .tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .tag {
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      background: rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.35);
+    }
+    .tag.pay { background: rgba(240,128,100,0.3); border-color: rgba(240,128,100,0.5); }
+    .song-name {
+      font-size: 22px; font-weight: 800;
+      line-height: 1.25;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .song-artist {
+      margin-top: 6px;
+      font-size: 14px; font-weight: 500; opacity: 0.9;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .song-album {
+      margin-top: 4px;
+      font-size: 12px; font-weight: 500; opacity: 0.75;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* ── 详情区 ── */
+    .body { padding: 18px 20px 16px; }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .meta-item {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: linear-gradient(165deg, #fff 0%, #f8fcfa 100%);
+      border: 1px solid var(--line);
+    }
+    .meta-label {
+      font-size: 11px; font-weight: 700;
+      color: var(--muted);
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .meta-value {
+      font-size: 15px; font-weight: 800;
+      color: var(--text);
+    }
+    .meta-value.small {
+      font-size: 12px; font-weight: 600;
+      word-break: break-all;
+    }
+
+    /* ── 提示 ── */
+    .tips {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: radial-gradient(circle at 100% 0%, rgba(49,194,124,0.12), transparent 50%),
+        linear-gradient(160deg, #f0faf5, #e8f7ef);
+      border: 1px solid var(--line);
+      font-size: 11.5px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .tips strong { color: var(--qm-deep); }
+
+    /* ── 底部 ── */
+    .footer {
+      margin-top: 10px;
+      padding: 2px 4px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--muted);
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="card">
+      <div class="hero">
+        <div class="cover-wrap">
+          {{if data.cover}}
+          <img src="{{data.cover}}" referrerpolicy="no-referrer" />
+          {{else}}
+          <div class="ph">♪</div>
+          {{/if}}
+        </div>
+        <div class="info">
+          <div class="tag-row">
+            {{if data.qualityLabel}}<div class="tag">{{data.qualityLabel}}</div>{{/if}}
+            {{if data.payplay}}<div class="tag pay">付费</div>{{else}}<div class="tag">免费</div>{{/if}}
+            {{if data.source}}<div class="tag">{{data.source}}</div>{{/if}}
+          </div>
+          <div class="song-name">{{data.songName || '未知'}}</div>
+          <div class="song-artist">{{data.singerName || '未知歌手'}}</div>
+          {{if data.albumName}}<div class="song-album">专辑：{{data.albumName}}</div>{{/if}}
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="meta-grid">
+          {{if data.duration}}
+          <div class="meta-item">
+            <div class="meta-label">时长</div>
+            <div class="meta-value">{{data.duration}}</div>
+          </div>
+          {{/if}}
+          {{if data.albumName}}
+          <div class="meta-item">
+            <div class="meta-label">专辑</div>
+            <div class="meta-value small">{{data.albumName}}</div>
+          </div>
+          {{/if}}
+          {{if data.qualityLabel}}
+          <div class="meta-item">
+            <div class="meta-label">音质</div>
+            <div class="meta-value">{{data.qualityLabel}}</div>
+          </div>
+          {{/if}}
+          {{if data.source}}
+          <div class="meta-item">
+            <div class="meta-label">来源</div>
+            <div class="meta-value">{{data.source}}</div>
+          </div>
+          {{/if}}
+        </div>
+
+        <div class="tips">
+          <strong>♪</strong> {{data.tip || '发送 #qqm听序号 播放当前列表中的歌曲'}}
+        </div>
+
+        <div class="footer">
+          <span>qqmusic-plugin</span>
+          <span>QQ音乐</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
