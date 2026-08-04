@@ -1,5 +1,5 @@
 <p align="center">  
-  <img src="resources/img/logo-64.png" width="120" alt="logo">
+  <img src="resources/img/logo.png" width="120" alt="logo">
 </p>
 
 <h1 align="center">qqmusic-plugin</h1>
