@@ -10,3 +10,5 @@ version: v1.0.0
 author: wbndm
 repo: https://github.com/wbndmqaq/astrbot_plugin_qqmusic
 astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
