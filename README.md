@@ -83,6 +83,10 @@ QQ 群：[点击加入](https://qm.qq.com/q/GKxEVvF8Ua)
 
 主人发送 `#qqm登录` 扫码即可开始使用。
 
+## QQ 官方机器人适配
+
+自 v1.2.0 起支持 QQ 官方机器人（`qq_official` 适配器）
+
 ## 项目结构
 
 ```

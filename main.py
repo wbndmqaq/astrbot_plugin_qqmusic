@@ -91,7 +91,7 @@ def _collect_message_text(event: AstrMessageEvent) -> str:
     "astrbot_plugin_qqmusic",
     "wbndm",
     "QQ音乐点歌/解析",
-    "1.0.0",
+    "1.2.0",
     "https://github.com/wbndmqaq/astrbot_plugin_qqmusic",
 )
 class QQMusicPlugin(Star):
@@ -115,8 +115,19 @@ class QQMusicPlugin(Star):
     def _plain(self, text: str) -> Plain:
         return Plain(text=text)
 
+    async def _send_chain(self, event: AstrMessageEvent, *components):
+        """以 MessageChain 包装后发送。
+
+        AstrBot 各适配器的 send 需要的是 MessageChain（访问 .chain），裸传单个组件
+        会抛 AttributeError。这里统一包装，空列表跳过，避免重复样板代码。
+        """
+        comps = [c for c in components if c is not None]
+        if not comps:
+            return
+        await event.send(MessageChain(comps))
+
     async def _reply(self, event: AstrMessageEvent, text: str):
-        await event.send(self._plain(text))
+        await self._send_chain(event, self._plain(text))
 
     def _scope(self, event: AstrMessageEvent) -> str:
         gid = getattr(event.message_obj, "group_id", None)
@@ -175,14 +186,14 @@ class QQMusicPlugin(Star):
         try:
             url = await self._render_card(event, data, tpl_name)
             if url:
-                await event.send(Image.fromURL(url))
+                await self._send_chain(event, Image.fromURL(url))
                 return True
         except Exception as e:
             self._log_warn(f"{tpl_name} 卡片渲染失败，回退文本: {e}")
         try:
             text = format_text(data) if callable(format_text) else (fallback_text or "")
             if text:
-                await event.send(self._plain(text))
+                await self._send_chain(event, self._plain(text))
                 return True
         except Exception as e:
             self._log_warn(f"{tpl_name} 文本兜底失败: {e}")
@@ -301,7 +312,7 @@ class QQMusicPlugin(Star):
         )
         url = await self._render_card(event, card_data, "qqmusic-detail")
         if url:
-            await event.send(Image.fromURL(url))
+            await self._send_chain(event, Image.fromURL(url))
             return
         await self._reply(event, cardlib.format_detail_text(song, quality_label=q_label, has_url=bool(play.get("url"))))
 
@@ -369,7 +380,7 @@ class QQMusicPlugin(Star):
             data = cardlib.build_help_card_data(cfg=self._cfg(), version=version)
             url = await self._render_card(event, data, "qqmusic-help")
             if url:
-                await event.send(Image.fromURL(url))
+                await self._send_chain(event, Image.fromURL(url))
                 event.stop_event()
                 return
         except Exception as err:
@@ -934,7 +945,7 @@ class QQMusicPlugin(Star):
         card_data["tip"] = (f"正在下载并发送语音（{q_label or '默认音质'}）..." if play.get("url") else (fail_hint or "未获取到播放链接"))
         url = await self._render_card(event, card_data, "qqmusic-detail")
         if url:
-            await event.send(Image.fromURL(url))
+            await self._send_chain(event, Image.fromURL(url))
         else:
             text_block = [f"{prefix}QQ音乐 · 解析下载中", cardlib.format_detail_text(song, quality_label=q_label, has_url=bool(play.get("url")))]
             if fail_hint:
@@ -1075,7 +1086,7 @@ class QQMusicPlugin(Star):
             data = await self._build_status_data(user_key)
             url = await self._render_card(event, data, "qqmusic-status")
             if url:
-                await event.send(Image.fromURL(url))
+                await self._send_chain(event, Image.fromURL(url))
             else:
                 await self._reply(event, cardlib.format_status_text(data))
         except Exception as e:
@@ -1108,26 +1119,27 @@ class QQMusicPlugin(Star):
             qrcode = data.get("qrcode")
             expires_in = data.get("expiresIn") or 900
             tips = data.get("tips") or "请使用 QQ / 微信 / QQ音乐 App 扫码"
-            img_sent = False
+            tip_text = "\n".join(x for x in [tips, f"二维码 {round(expires_in / 60)} 分钟内有效"] if x)
+            # 准备二维码图片
+            qr_path = None
             if qrcode_b64:
-                file_path = await self._save_qr_image(qrcode_b64)
+                qr_path = await self._save_qr_image(qrcode_b64)
+            elif qrcode and qrcode.startswith("data:"):
+                b64 = qrcode.split(",", 1)[1]
+                qr_path = await self._save_qr_image(b64)
+            img_sent = False
+            if qr_path:
                 try:
-                    await event.send(Image.fromFileSystem(file_path))
+                    # 图片+提示合并为一条消息（QQ 官方可省一次被动回复额度）
+                    await self._send_chain(event, Image.fromFileSystem(qr_path), self._plain(tip_text))
                     img_sent = True
                 except Exception:
                     pass
                 # 120s 后清理
                 loop = asyncio.get_event_loop()
-                loop.call_later(120, lambda: self._safe_unlink(file_path))
-            elif qrcode and qrcode.startswith("data:"):
-                b64 = qrcode.split(",", 1)[1]
-                file_path = await self._save_qr_image(b64)
-                try:
-                    await event.send(Image.fromFileSystem(file_path))
-                    img_sent = True
-                except Exception:
-                    pass
-            await self._reply(event, "\n".join(x for x in [tips, f"二维码 {round(expires_in / 60)} 分钟内有效", "" if img_sent else "（图片发送失败可重新 #qqm登录）"] if x))
+                loop.call_later(120, lambda: self._safe_unlink(qr_path))
+            if not img_sent:
+                await self._reply(event, tip_text + "\n（图片发送失败可重新 #qqm登录）")
             self._start_poll(event, qrcode_id, expires_in)
         except Exception as err:
             await self._reply(event, f"扫码登录失败：{err}")
@@ -1258,7 +1270,7 @@ class QQMusicPlugin(Star):
                 data["vipExpireText"] = api_hint
             url = await self._render_card(event, data, "qqmusic-status")
             if url:
-                await event.send(Image.fromURL(url))
+                await self._send_chain(event, Image.fromURL(url))
             else:
                 await self._reply(event, cardlib.format_status_text(data) + (f"\n{api_hint}" if api_hint else ""))
         except Exception as err:
@@ -1517,7 +1529,7 @@ class QQMusicPlugin(Star):
             data = await self._build_settings_data(event)
             url = await self._render_card(event, data, "qqmusic-settings")
             if url:
-                await event.send(Image.fromURL(url))
+                await self._send_chain(event, Image.fromURL(url))
                 event.stop_event()
                 return
         except Exception as err:
