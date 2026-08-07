@@ -1,9 +1,3 @@
-"""qqmusic-api 客户端 —— 移植自 utils/api.js
-
-所有网络请求的唯一入口是 `request()`。GET 参数走 query，POST 参数走 body（json）。
-鉴权头同时带 `x-api-token` 与 `Authorization: Bearer <token>`；`x-qqmusic-user` 在 ASCII 安全时附带。
-结果码 0 与 100 视为成功，其余抛出带 `.code/.payload/.pay/.retcode/.tip` 的 ApiError。
-"""
 from __future__ import annotations
 
 import json
@@ -42,7 +36,6 @@ def _cfg() -> dict:
 
 
 class ApiError(Exception):
-    """API 返回非 0/100 result 时抛出，携带丰富的诊断字段"""
 
     def __init__(self, message: str, *, code=None, payload=None, pay=None, retcode=None, tip=None):
         super().__init__(message)
@@ -60,12 +53,32 @@ def _get_base() -> str:
 
 def _get_token() -> str:
     c = _cfg()
-    return str(c.get("apiToken") or c.get("api_token") or "").strip()
+    token = c.get("apiToken") or c.get("api_token") or ""
+    if not token:
+        # 与 JS 版一致：支持环境变量 QQMUSIC_API_TOKEN（对应 API 端 .env 的 QQMUSIC_API_TOKEN）
+        import os
+        token = os.environ.get("QQMUSIC_API_TOKEN") or ""
+    return str(token).strip()
 
 
 def _sanitize_for_header(value: str) -> str:
-    """清洗 userKey 使其可作为 HTTP header 值（仅可打印 ASCII 0x20-0x7E）"""
+
     return re.sub(r"[\r\n\t]", "", re.sub(r"[^\x20-\x7E]", "", str(value or ""))).strip()
+
+
+def _query_safe_params(params: dict) -> dict:
+
+    out: dict = {}
+    for k, v in params.items():
+        if isinstance(v, bool):
+            out[k] = int(v)
+        elif v is None:
+            continue
+        elif isinstance(v, (str, int, float)):
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
 
 
 def _empty_url_result(type_: str, media_id: str, extra: dict | None = None) -> dict:
@@ -88,7 +101,7 @@ def _empty_url_result(type_: str, media_id: str, extra: dict | None = None) -> d
 
 
 async def request(pathname: str, params: dict | None = None, method: str = "get", user_key: str = "") -> Any:
-    """中央 HTTP 调用"""
+
     params = dict(params or {})
     base = _get_base()
     url = f"{base}{pathname if pathname.startswith('/') else '/' + pathname}"
@@ -108,7 +121,8 @@ async def request(pathname: str, params: dict | None = None, method: str = "get"
     try:
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             if method == "get":
-                async with sess.get(url, params=params, headers=headers or None) as res:
+                # GET 参数走 query：规整 bool/None，避免 aiohttp 严格类型校验抛错
+                async with sess.get(url, params=_query_safe_params(params), headers=headers or None) as res:
                     return await _handle_response(res, base, url)
             else:
                 async with sess.post(url, json=params, headers=headers or None) as res:
@@ -320,7 +334,7 @@ async def song_url(songmid: str, *, type_: str = "128", media_id: str = "", chan
 async def _probe_url_alive(url: str, timeout: int = 6) -> bool:
     if not url:
         return False
-    headers = {"User-Agent": UA, "Referer": "https://y.qq.com/", "Origin": "https://y.yml.com"}
+    headers = {"User-Agent": UA, "Referer": "https://y.qq.com/", "Origin": "https://y.qq.com/"}
     # 两阶段：先 HEAD，失败再 Range GET 嗅探首字节
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as sess:
@@ -356,7 +370,7 @@ async def song_url_best(
     probe: bool = True,
     user_key: str = "",
 ) -> dict:
-    """最高音质 + 自适配降级"""
+
     preferred = (quality or "flac").lower()
     candidate_list = quality_candidates(preferred, fallback)
     real_media = media_id or songmid
@@ -482,7 +496,7 @@ async def recommend_hot(user_key: str = "") -> list:
 
 
 async def recommend_feed(user_key: str = "") -> list:
-    """随机推荐一首（取一个推荐歌单再拿其歌曲）"""
+
     import random
     try:
         body = await request(
@@ -807,16 +821,28 @@ def parse_qqmusic_extended_ids(text: str = "") -> dict:
     return out
 
 
-def parse_qqmusic_card(msg) -> dict | None:
-    text = msg if isinstance(msg, str) else ""
-    if not text:
+def _try_parse_json_loose(text: str):
+
+    if not text or not isinstance(text, str):
         return None
     t = text.strip()
     if not t.startswith("{"):
         return None
     try:
-        obj = json.loads(t)
+        return json.loads(t)
     except Exception:
+        try:
+            return json.loads(t.replace('\\"', '"').replace("\\\\", "\\"))
+        except Exception:
+            return None
+
+
+def parse_qqmusic_card(msg) -> dict | None:
+    text = msg if isinstance(msg, str) else ""
+    if not text:
+        return None
+    obj = _try_parse_json_loose(text)
+    if obj is None:
         return None
     if not isinstance(obj, dict):
         return None

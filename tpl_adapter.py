@@ -1,18 +1,9 @@
-"""art-template → Jinja2 模板语法适配器
-
-原 Yunzai 插件的 HTML 卡片使用 art-template 语法（{{if}}/{{each}}/{{/if}}/{{/each}}、
-{{data.x || '默认'}}、{{cond ? a : b}}）。AstrBot 的 html_render 基于 Jinja2。
-这里在渲染前把 art-template 语法翻译为等价 Jinja2 语法，保留全部原模板样式/CSS。
-"""
 from __future__ import annotations
 
 import re
 
 
 def _convert_conditional(s: str) -> str:
-    """把 JS 三元 cond ? a : b 翻成 Jinja 的 (a if cond else b)。
-    仅处理出现在 {{ }} 内、形如 X ? Y : Z 的简单三元（可能嵌套、可能含字符串字面量）。
-    为简单起见，分两种：含字符串字面量的、不含的。"""
     # 处理 {{ ... ? 'a' : 'b' }}  —— 直接转 (a if cond else b)
     def repl_ternary(m):
         inner = m.group(1).strip()
@@ -73,7 +64,6 @@ def _convert_conditional(s: str) -> str:
 
 
 def _jsval_to_jinja(v: str, *, is_cond: bool = False) -> str:
-    """把 JS 表达式片段转 Jinja2 等价。处理 ||、字符串字面量、属性访问。"""
     v = v.strip()
     if not v:
         return "''"
@@ -111,7 +101,6 @@ def _jsval_to_jinja(v: str, *, is_cond: bool = False) -> str:
 
 
 def _split_top(s: str, op: str) -> list[str]:
-    """按顶层 op 分割（忽略括号与字符串内的 op）"""
     parts = []
     depth = 0
     in_str = None
@@ -152,7 +141,6 @@ def _split_top(s: str, op: str) -> list[str]:
 
 
 def convert_template(src: str) -> str:
-    """把整份 art-template HTML 转为 Jinja2 HTML。"""
     out = src
 
     # 块标签转换
@@ -203,7 +191,6 @@ _cache: dict[str, str] = {}
 
 
 def get_jinja_template(tpl_path: str) -> str:
-    """读取 art-template HTML，转成 Jinja2，缓存。"""
     if tpl_path in _cache:
         return _cache[tpl_path]
     with open(tpl_path, "r", encoding="utf-8") as f:

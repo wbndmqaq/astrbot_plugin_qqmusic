@@ -1,10 +1,3 @@
-"""音频下载与投递 —— 移植自 utils/send.js
-
-AstrBot 的消息组件（Record / File / Image）已屏蔽适配器差异，因此这里比原 send.js 简洁得多。
-- 下载：用 aiohttp 流式下载到临时文件，按音质/URL 推断扩展名。
-- 投递：语音用 Record.fromFileSystem，群/好友文件用 File(name, file=路径)。
-- 原生/自定义音乐卡：尽力而为，仅在 AIOCQHTTP 平台尝试 OneBot sendApi。
-"""
 from __future__ import annotations
 
 import asyncio
@@ -24,9 +17,11 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 
 def _is_qqofficial(event) -> bool:
-    """是否运行在 QQ 官方机器人适配器上。"""
     try:
-        return event.get_platform_name() == "qq_official"
+        name = event.get_platform_name()
+        if not name:
+            return False
+        return "qq_official" in str(name)
     except Exception:
         return False
 
@@ -76,8 +71,14 @@ def _ext_for_quality(quality_hint: str, url: str) -> str:
     if q in ("m4a",):
         return ".m4a"
     u = (url or "").lower()
+    # 与 JS send.js 对齐：显式扩展名优先，再按前缀推断
+    for ext in (".ape", ".ogg", ".flac", ".m4a", ".mp3"):
+        if ext in u:
+            return ext
     if re.search(r"f000|rs01|rs02|q000", u):
         return ".flac"
+    if re.search(r"a000|ape", u):
+        return ".ape"
     if re.search(r"c400|m4a", u):
         return ".m4a"
     if re.search(r"m800|m500|mp3", u):
@@ -86,7 +87,6 @@ def _ext_for_quality(quality_hint: str, url: str) -> str:
 
 
 async def download_audio(url: str, save_dir: str, filename: str = "qqmusic", timeout_ms: int = 90000, quality_hint: str = "") -> dict:
-    """下载音频到本地，返回 {filePath, size}"""
     headers = {
         "User-Agent": UA,
         "Referer": "https://y.qq.com/",
@@ -130,7 +130,6 @@ def _schedule_cleanup(file_path: str, keep_sec: int):
 
 
 async def send_native_music_card(event, platform_type: str, music_id: str) -> bool:
-    """OneBot 原生音乐卡片：{type:'music', data:{type, id}}。尽力而为，仅 AIOCQHTTP。"""
     try:
         from astrbot.api.message_components import Plain
         bot = event.platform
@@ -157,7 +156,6 @@ async def send_native_music_card(event, platform_type: str, music_id: str) -> bo
 
 
 async def send_custom_music_card(event, *, url: str, audio: str, title: str, image: str = "", content: str = "") -> bool:
-    """OneBot 自定义音乐卡片。尽力而为。"""
     try:
         bot = event.platform
         send_api = getattr(bot, "send_api", None) or getattr(bot, "sendApi", None)
@@ -180,7 +178,6 @@ async def send_custom_music_card(event, *, url: str, audio: str, title: str, ima
 
 
 async def deliver_song(plugin, event, song: dict, play: dict, *, cfg: dict, plugin_dir: str, options: dict | None = None) -> dict:
-    """综合发送：可选文案/音乐卡 → 下载 → 语音 → 文件"""
     options = options or {}
     title = song.get("songName") or "未知歌曲"
     singer = song.get("singerName") or "未知歌手"
@@ -264,28 +261,24 @@ async def deliver_song(plugin, event, song: dict, play: dict, *, cfg: dict, plug
     file_display = build_music_filename(singer=singer, title=title, quality=play.get("quality") or cfg.get("quality") or "", ext=ext)
 
     async def _send_media(media_comp):
-        """发送一条媒体；若仍有待发文案则合并到本条（QQ 官方省被动回复额度）。"""
-        comps = [plugin._plain(pending_text), media_comp] if pending_text else [media_comp]
+         comps = [plugin._plain(pending_text), media_comp] if pending_text else [media_comp]
         await plugin._send_chain(event, *comps)
 
     if is_qqoff and want_vocal and want_file:
-        # QQ 官方：语音(silk 低码率、需 ffmpeg) 与文件不重复发；语音优先，失败回退文件
-        vocal_ok = False
-        try:
-            await _send_media(Record.fromFileSystem(local_path))
-            vocal_ok = True
-        except Exception as e:
-            plugin._log_warn(f"语音发送失败（QQ 官方将回退文件）: {e}")
-        if vocal_ok:
-            pending_text = ""
-            _schedule_cleanup(local_path, keep_sec)
-        else:
+        # QQ 官方：语音(silk 转码)与文件都尝试发送，互不阻塞（语音失败不影响文件）
+        if want_vocal:
+            try:
+                await _send_media(Record.fromFileSystem(local_path))
+                pending_text = ""
+            except Exception as e:
+                plugin._log_warn(f"语音发送失败（QQ 官方）: {e}")
+        if want_file:
             try:
                 await _send_media(File(file_display, file=local_path))
                 pending_text = ""
             except Exception as e:
-                plugin._log_warn(f"文件发送失败: {e}")
-            _schedule_cleanup(local_path, keep_sec)
+                plugin._log_warn(f"文件发送失败（QQ 官方）: {e}")
+        _schedule_cleanup(local_path, keep_sec)
     else:
         # 其它平台或仅开其一：按配置各自发送
         if want_vocal:

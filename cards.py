@@ -1,8 +1,3 @@
-"""会话存储 / 隐脱敏 / 文本兜底格式化 —— 移植自 utils/session.js + privacy.js + format.js + card-data.js
-
-会话存储使用 AstrBot 插件隔离的 KV 接口（self.put_kv_data/get_kv_data），
-封装为带 TTL 的辅助类（TTL 由调用方在取出时校验，因 KV 不原生支持过期）。
-"""
 from __future__ import annotations
 
 import re
@@ -16,7 +11,6 @@ from .quality import QUALITY_LABEL
 
 
 class SessionStore:
-    """点歌列表会话存储，按群/用户隔离。优先 KV，失败回退内存。"""
 
     _mem: dict = {}
     TTL = 600
@@ -123,7 +117,8 @@ def format_list_text(lst: list) -> str:
     for i, s in enumerate(lst):
         pay = " [付费]" if s.get("payplay") else ""
         dur = f" ({s['duration']})" if s.get("duration") else ""
-        lines.append(f"{i + 1}. {s.get('songName', '')} - {s.get('singerName', '')}{pay}{dur}")
+        singer = s.get("singerName") or s.get("singer") or ""
+        lines.append(f"{i + 1}. {s.get('songName', '')} - {singer}{pay}{dur}")
     return f"♫ QQ音乐点歌结果（#qqm听序号 或 #听序号）\n" + "\n".join(lines)
 
 
@@ -256,6 +251,69 @@ def build_lyric_card_data(*, song_name="未知", singer_name="未知", cover="",
         "lineCount": len(body),
         "apiHint": api_hint_for(cfg),
         "tip": "仅展示前 36 行，完整歌词请到 QQ 音乐查看" if len(body) >= 36 else "已去除时间戳，纯文本歌词",
+    }
+
+
+def clean_comment_text(text: str = "") -> str:
+
+    import re as _re
+
+    s = str(text or "")
+    s = _re.sub(r"\[em\]e?\d+\[/em\]", "", s, flags=_re.I)  # [em]e400668[/em] 表情代码
+    s = _re.sub(r"\[[\w一-鿿]{1,10}\]", " ", s)  # [音频] [图片] 等剩余标记
+    s = s.replace("\\r\\n", " ").replace("\\n", " ")  # 字面量 \r\n / \n（接口常返回反斜杠+n）
+    s = _re.sub(r"\r?\n", " ", s)
+    s = _re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def format_comment_time(ts) -> str:
+  
+    if not ts:
+        return ""
+    try:
+        t = int(ts)
+        if t <= 0:
+            return ""
+        from datetime import datetime
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
+def build_comment_card_data(*, song_name="未知", singer_name="未知", cover="", album_name="", comments=None, songmid="", tip="", cfg: dict | None = None) -> dict:
+
+    cfg = cfg or {}
+    lst = []
+    for i, c in enumerate(comments or []):
+        if not isinstance(c, dict):
+            continue
+        nick = c.get("nick") or c.get("nickname") or "匿名"
+        raw = c.get("rootcommentcontent") or c.get("middlecommentcontent") or c.get("content") or c.get("comment") or ""
+        content = clean_comment_text(raw) or "（仅表情 / 图片）"
+        lst.append(
+            {
+                "index": i + 1,
+                "nick": str(nick),
+                "avatar": c.get("avatarurl") or c.get("headurl") or c.get("headPic") or "",
+                "avatarPh": str(nick)[:1] if nick != "匿名" else "匿",
+                "time": format_comment_time(c.get("time")),
+                "likes": c.get("praisenum") or c.get("likeCount") or 0,
+                "content": content,
+                "hot": bool(c.get("is_hot") or c.get("is_hot_cmt")),
+            }
+        )
+    lst = lst[:20]
+    return {
+        "songName": song_name,
+        "singerName": singer_name,
+        "cover": cover or "",
+        "albumName": album_name or "",
+        "songmid": songmid or "",
+        "comments": lst,
+        "total": len(lst),
+        "tip": tip or "发送 #qqm点歌 关键词 可以搜索播放",
+        "apiHint": api_hint_for(cfg),
     }
 
 

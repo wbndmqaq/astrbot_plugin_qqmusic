@@ -1,7 +1,3 @@
-"""git 自更新 —— 移植自 utils/update.js（精简版）
-
-仅实现核心的 pull / force-reset / log，依赖系统 git。
-"""
 from __future__ import annotations
 
 import asyncio
@@ -26,7 +22,6 @@ def get_local_version(plugin_dir: str) -> str:
 
 
 async def _run_git(args: list[str], cwd: str, timeout: int = 120) -> tuple[int, str, str]:
-    """异步执行 git，返回 (returncode, stdout, stderr)"""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git", *args,

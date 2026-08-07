@@ -1,4 +1,3 @@
-"""QQ音乐音质档位（最高音质 + 自动降级/自适配）—— 移植自 utils/quality.js"""
 from __future__ import annotations
 
 from typing import Any
@@ -37,7 +36,7 @@ SIZE_NEW_INDEX = {0: "master", 2: "hires", 10: "atmos"}
 
 
 def _num(v: Any) -> float:
-    """安全转数字（剔除 None/数组/对象）"""
+
     if v is None or isinstance(v, (list, dict)):
         return 0
     try:

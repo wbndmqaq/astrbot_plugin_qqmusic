@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>QQ音乐 · 热搜</title>
+  <title>QQ音乐 · 评论</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -42,7 +42,7 @@
     }
 
     .card {
-      width: 560px;
+      width: 600px;
       border-radius: 28px;
       overflow: hidden;
       position: relative;
@@ -73,20 +73,24 @@
       gap: 14px;
     }
 
-    .brand-mark {
-      width: 48px;
-      height: 48px;
+    .cover {
+      width: 72px;
+      height: 72px;
       border-radius: 16px;
+      object-fit: cover;
       background: rgba(255,255,255,0.2);
       border: 1px solid rgba(255,255,255,0.35);
+      box-shadow: 0 8px 18px rgba(0,0,0,0.12);
+      display: block;
+      flex-shrink: 0;
+    }
+
+    .cover.ph {
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 22px;
+      font-size: 28px;
       font-weight: 800;
-      letter-spacing: -1px;
-      box-shadow: 0 8px 18px rgba(0,0,0,0.12);
-      flex-shrink: 0;
     }
 
     .hero-text { flex: 1; min-width: 0; }
@@ -101,10 +105,14 @@
 
     .title {
       margin-top: 6px;
-      font-size: 26px;
+      font-size: 24px;
       font-weight: 800;
-      line-height: 1.2;
+      line-height: 1.25;
       text-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 380px;
     }
 
     .subtitle {
@@ -113,6 +121,10 @@
       font-weight: 500;
       opacity: 0.9;
       line-height: 1.45;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 380px;
     }
 
     .version-pill {
@@ -143,9 +155,12 @@
     }
 
     .stat-num {
-      font-size: 18px;
+      font-size: 16px;
       font-weight: 800;
       line-height: 1.1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .stat-label {
@@ -197,18 +212,17 @@
       border-radius: 999px;
     }
 
-    .cmd-list {
+    /* ── 评论列表：每条一个格子 ── */
+    .cmt-list {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
     }
 
-    .cmd {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px 12px;
-      align-items: center;
-      padding: 12px 14px;
+    .cmt {
+      display: flex;
+      gap: 12px;
+      padding: 14px 14px 12px;
       border-radius: 16px;
       background: linear-gradient(165deg, #ffffff 0%, #f8fcfa 100%);
       border: 1px solid var(--line);
@@ -217,7 +231,7 @@
       overflow: hidden;
     }
 
-    .cmd::before {
+    .cmt::before {
       content: "";
       position: absolute;
       left: 0; top: 0; bottom: 0;
@@ -227,41 +241,102 @@
       opacity: 0.85;
     }
 
-    .cmd-main { min-width: 0; padding-left: 4px; }
-
-    .cmd-name {
-      font-size: 15px;
-      font-weight: 800;
-      line-height: 1.35;
-      letter-spacing: 0.15px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .cmd-desc {
-      margin-top: 4px;
-      font-size: 12.5px;
-      color: var(--muted);
-      font-weight: 500;
-      line-height: 1.45;
-    }
-
-    .cmd-example {
-      justify-self: end;
-      max-width: 200px;
-      padding: 6px 10px;
-      border-radius: 10px;
+    .cmt-avatar {
+      flex-shrink: 0;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      object-fit: cover;
       background: var(--chip);
-      border: 1px solid rgba(49, 194, 124, 0.18);
+      border: 1px solid rgba(49, 194, 124, 0.25);
+    }
+
+    .cmt-avatar.ph {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 800;
       color: var(--qm-deep);
-      font-size: 12px;
-      font-weight: 700;
-      font-family: "Cascadia Code", "Consolas", "SF Mono", monospace;
-      letter-spacing: 0;
+    }
+
+    .cmt-main {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .cmt-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .cmt-nick {
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--qm-deep);
+      letter-spacing: 0.2px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      max-width: 240px;
+    }
+
+    .cmt-badge {
+      flex-shrink: 0;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1.4;
+    }
+
+    .cmt-badge.hot {
+      color: #fff;
+      background: linear-gradient(135deg, #ff9a62, #ff5f6d);
+    }
+
+    .cmt-time {
+      margin-left: auto;
+      flex-shrink: 0;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .cmt-content {
+      margin-top: 6px;
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--text);
+      line-height: 1.6;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .cmt-foot {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .cmt-like {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    .cmt-like svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .cmt-like.on {
+      color: var(--qm-deep);
     }
 
     .tips {
@@ -317,6 +392,10 @@
       font-size: 10.5px;
       color: var(--muted);
       font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 400px;
     }
 
     .footer-right {
@@ -332,26 +411,30 @@
     <div class="card">
       <div class="hero">
         <div class="hero-top">
-          <div class="brand-mark">🔥</div>
+          {{if data.cover}}
+          <img class="cover" src="{{data.cover}}" referrerpolicy="no-referrer" />
+          {{else}}
+          <div class="cover ph">♪</div>
+          {{/if}}
           <div class="hero-text">
-            <div class="eyebrow">QQ MUSIC HOT</div>
-            <div class="title">{{data.title || '热搜榜'}}</div>
-            <div class="subtitle">{{data.subtitle || '实时热搜 · 可直接 #qqm点歌 关键词'}}</div>
+            <div class="eyebrow">QQ MUSIC COMMENT</div>
+            <div class="title">{{data.songName || '热门评论'}}</div>
+            <div class="subtitle">{{data.singerName || ''}}{{data.albumName ? ' · ' + data.albumName : ''}}</div>
           </div>
-          <div class="version-pill">TOP {{data.total || 0}}</div>
+          <div class="version-pill">{{data.total || 0}} 条</div>
         </div>
         <div class="hero-stats">
           <div class="stat">
             <div class="stat-num">{{data.total || 0}}</div>
-            <div class="stat-label">热搜词</div>
+            <div class="stat-label">评论条数</div>
           </div>
           <div class="stat">
-            <div class="stat-num">实时</div>
-            <div class="stat-label">更新节奏</div>
+            <div class="stat-num">精选</div>
+            <div class="stat-label">展示模式</div>
           </div>
           <div class="stat">
-            <div class="stat-num">#qqm点歌</div>
-            <div class="stat-label">搜索指令</div>
+            <div class="stat-num">{{data.songmid ? 'MID' : '—'}}</div>
+            <div class="stat-label">{{data.songmid || '无 mid'}}</div>
           </div>
         </div>
       </div>
@@ -360,48 +443,39 @@
         <div class="section">
           <div class="section-head">
             <div class="section-dot"></div>
-            <div class="section-title">实时热搜</div>
+            <div class="section-title">热门评论</div>
             <div class="section-tag">TOP {{data.total || 0}}</div>
           </div>
-          <div class="cmd-list">
-            {{each data.items item}}
-            <div class="cmd">
-              <div class="cmd-main">
-                <div class="cmd-name">{{item.word}}</div>
+          <div class="cmt-list">
+            {{each data.comments c}}
+            <div class="cmt">
+              {{if c.avatar}}
+              <img class="cmt-avatar" src="{{c.avatar}}" referrerpolicy="no-referrer" alt="" />
+              {{else}}
+              <div class="cmt-avatar ph">{{c.avatarPh}}</div>
+              {{/if}}
+              <div class="cmt-main">
+                <div class="cmt-head">
+                  <span class="cmt-nick">{{c.nick}}</span>
+                  {{if c.hot}}<span class="cmt-badge hot">热</span>{{/if}}
+                  <span class="cmt-time">{{c.time}}</span>
+                </div>
+                <div class="cmt-content">{{c.content}}</div>
+                <div class="cmt-foot">
+                  <span class="cmt-like {{c.likes > 0 ? 'on' : ''}}">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9h3v12H2a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1zm5.293-1.293l6.4-6.4a1 1 0 0 1 1.4 0l.9.9a1 1 0 0 1 .3.707V6a1 1 0 0 1-1 1H9v2h11a2 2 0 0 1 2 2.1l-.9 6.4a2 2 0 0 1-2 1.9H7z"/></svg>
+                    {{c.likes}}
+                  </span>
+                </div>
               </div>
-              <div class="cmd-example">{{item.hot || 'HOT'}}</div>
             </div>
             {{/each}}
           </div>
         </div>
 
-        <div class="section">
-          <div class="section-head">
-            <div class="section-dot"></div>
-            <div class="section-title">常用指令</div>
-            <div class="section-tag">快捷</div>
-          </div>
-          <div class="cmd-list">
-            <div class="cmd">
-              <div class="cmd-main">
-                <div class="cmd-name">#qqm点歌 关键词</div>
-                <div class="cmd-desc">搜索歌曲并展示结果卡片</div>
-              </div>
-              <div class="cmd-example">#qqm点歌 起风了</div>
-            </div>
-            <div class="cmd">
-              <div class="cmd-main">
-                <div class="cmd-name">#qqm听序号</div>
-                <div class="cmd-desc">播放当前列表中的指定歌曲</div>
-              </div>
-              <div class="cmd-example">#qqm听1</div>
-            </div>
-          </div>
-        </div>
-
         <div class="tips">
           <div class="tips-title"><span>!</span>小提示</div>
-          <div class="tips-body">{{data.tip || '复制热搜词后发送 #qqm点歌 关键词 即可搜索'}}</div>
+          <div class="tips-body">{{data.tip || '发送 #qqm点歌 关键词 可以搜索播放'}}</div>
         </div>
 
         <div class="footer">
