@@ -261,7 +261,7 @@ async def deliver_song(plugin, event, song: dict, play: dict, *, cfg: dict, plug
     file_display = build_music_filename(singer=singer, title=title, quality=play.get("quality") or cfg.get("quality") or "", ext=ext)
 
     async def _send_media(media_comp):
-         comps = [plugin._plain(pending_text), media_comp] if pending_text else [media_comp]
+        comps = [plugin._plain(pending_text), media_comp] if pending_text else [media_comp]
         await plugin._send_chain(event, *comps)
 
     if is_qqoff and want_vocal and want_file:
