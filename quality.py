@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 QQMUSIC_QUALITY_LIST = [
@@ -29,10 +30,13 @@ QUALITY_LADDER = [
 ]
 
 QUALITY_LABEL = {"auto": "自动适配"}
-QUALITY_LABEL.update({item["value"]: item["label"] for item in QQMUSIC_QUALITY_LIST if item["value"] != "auto"})
-
-# size_new 下标 → 逻辑音质（仅映射有把握的）
-SIZE_NEW_INDEX = {0: "master", 2: "hires", 10: "atmos"}
+QUALITY_LABEL.update(
+    {
+        item["value"]: item["label"]
+        for item in QQMUSIC_QUALITY_LIST
+        if item["value"] != "auto"
+    }
+)
 
 
 def _num(v: Any) -> float:
@@ -43,7 +47,7 @@ def _num(v: Any) -> float:
         f = float(v)
     except (TypeError, ValueError):
         return 0
-    return f if f == f and f != float("inf") else 0  # NaN/inf guard
+    return f if math.isfinite(f) else 0  # NaN/±inf guard
 
 
 def size_new_at(file: dict, idx: int = 0) -> float:
@@ -53,27 +57,18 @@ def size_new_at(file: dict, idx: int = 0) -> float:
     if idx < 0 or idx >= len(arr):
         return 0
     v = _num(arr[idx])
-    return v if v > 0 else 0
-
-
-def size_new_for_quality(file: dict, type_: str) -> float:
-    t = (type_ or "").lower()
-    if t in ("master", "atmos_master"):
-        return size_new_at(file, 0)
-    if t == "hires":
-        return size_new_at(file, 2)
-    if t in ("atmos", "dolby"):
-        return size_new_at(file, 10)
-    return 0
+    return max(0, v)
 
 
 def quality_candidates(preferred: str = "flac", fallback: bool = True) -> list[str]:
     q = (preferred or "flac").lower()
     if q in ("auto", "adaptive", "best"):
         return list(QUALITY_LADDER) if fallback else ["flac", "320", "128"]
-    idx = QUALITY_LADDER.index(q) if q in QUALITY_LADDER else QUALITY_LADDER.index("flac")
+    idx = (
+        QUALITY_LADDER.index(q) if q in QUALITY_LADDER else QUALITY_LADDER.index("flac")
+    )
     if not fallback:
-        return [QUALITY_LADDER[idx] or "128"]
+        return [QUALITY_LADDER[idx]]
     return QUALITY_LADDER[idx:]
 
 
@@ -81,7 +76,7 @@ def is_quality_size_ok(type_: str, file: dict | None = None) -> bool:
     if not isinstance(file, dict):
         return True
     t = (type_ or "").lower()
-    n = lambda k: _num(file.get(k))  # noqa: E731
+    n = lambda k: _num(file.get(k))
 
     if t == "128":
         return n("size_128mp3") > 0 or n("size_96aac") > 0 or n("size_48aac") > 0
@@ -107,25 +102,3 @@ def pick_best_available_quality(file: dict, preferred: str = "auto") -> str:
         if is_quality_size_ok(type_, file):
             return type_
     return "128"
-
-
-def summarize_file_sizes(file: dict | None) -> dict:
-    if not isinstance(file, dict):
-        return {}
-    n = lambda k: _num(file.get(k))  # noqa: E731
-    arr = file.get("size_new")
-    arr = [_num(x) for x in arr] if isinstance(arr, list) else []
-    return {
-        "flac": n("size_flac"),
-        "hires": n("size_hires"),
-        "dolby": n("size_dolby"),
-        "s320": n("size_320mp3"),
-        "s128": n("size_128mp3"),
-        "new0": arr[0] if len(arr) > 0 else 0,
-        "new2": arr[2] if len(arr) > 2 else 0,
-        "new10": arr[10] if len(arr) > 10 else 0,
-    }
-
-
-# 兼容别名
-is_quality_available = is_quality_size_ok

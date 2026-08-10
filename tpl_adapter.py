@@ -25,7 +25,7 @@ def _convert_conditional(s: str) -> str:
         if qpos < 0:
             return m.group(0)
         cond = inner[:qpos].strip()
-        rest = inner[qpos + 1:]
+        rest = inner[qpos + 1 :]
         # 在 rest 里找顶层 ':'
         depth = 0
         cpos = -1
@@ -53,7 +53,7 @@ def _convert_conditional(s: str) -> str:
         if cpos < 0:
             return m.group(0)
         a = rest[:cpos].strip()
-        b = rest[cpos + 1:].strip()
+        b = rest[cpos + 1 :].strip()
         a = _jsval_to_jinja(a)
         b = _jsval_to_jinja(b)
         cond_j = _jsval_to_jinja(cond, is_cond=True)
@@ -67,12 +67,11 @@ def _jsval_to_jinja(v: str, *, is_cond: bool = False) -> str:
     v = v.strip()
     if not v:
         return "''"
-    # 字符串字面量
-    if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-        # Jinja 单引号字符串里转义单引号
+    # 字符串字面量（单/双引号统一转成 Jinja 单引号字符串，转义内部单引号）
+    if (v.startswith("'") and v.endswith("'")) or (
+        v.startswith('"') and v.endswith('"')
+    ):
         inner = v[1:-1]
-        if v[0] == '"':
-            return "'" + inner.replace("'", "\\'") + "'"
         return "'" + inner.replace("'", "\\'") + "'"
     # 数字
     if re.fullmatch(r"-?\d+(\.\d+)?", v):
@@ -93,7 +92,19 @@ def _jsval_to_jinja(v: str, *, is_cond: bool = False) -> str:
     # 属性访问 data.x / item.y —— Jinja 用点；但与 dict 内置方法（items/keys/values/get 等）冲突时改用 [] 访问
     v = v.replace("&&", " and ").replace("||", " or ") if is_cond else v
     # 处理 obj.prop 形式：若 prop 是 dict 内置方法名，转 obj['prop']
-    DICT_METHODS = {"items", "keys", "values", "get", "pop", "popitem", "setdefault", "update", "copy", "clear", "fromkeys"}
+    DICT_METHODS = {
+        "items",
+        "keys",
+        "values",
+        "get",
+        "pop",
+        "popitem",
+        "setdefault",
+        "update",
+        "copy",
+        "clear",
+        "fromkeys",
+    }
     m = re.fullmatch(r"([\w.]+)\.(\w+)", v)
     if m and m.group(2) in DICT_METHODS:
         return f"{m.group(1)}['{m.group(2)}']"
@@ -128,7 +139,7 @@ def _split_top(s: str, op: str) -> list[str]:
         elif ch == ")":
             depth -= 1
             cur += ch
-        elif depth == 0 and s[i:i + len(op)] == op:
+        elif depth == 0 and s[i : i + len(op)] == op:
             parts.append(cur)
             cur = ""
             i += len(op)
@@ -151,15 +162,11 @@ def convert_template(src: str) -> str:
     # {{each arr item idx}}  -> {% set item, idx = (arr | enumerate_items)[loop.index0] %}  —— 简化：仅支持 2 参
     # {{/each}}              -> {% endfor %}
 
-    # each 带 index: {{each data.songs song idx}}
+    # each: {{each arr item [idx]}} -> {% for item in arr %}
+    # （index 由 Jinja loop.index0/loop.index 提供，idx 参数忽略）
     def repl_each(m):
         parts = m.group(1).strip().split()
-        if len(parts) >= 3:
-            arr = _jsval_to_jinja(parts[0])
-            item = parts[1]
-            # Jinja: {% for item in arr %}（index 用 loop.index0/loop.index）
-            return f"{{% for {item} in {arr} %}}"
-        elif len(parts) == 2:
+        if len(parts) >= 2:
             arr = _jsval_to_jinja(parts[0])
             item = parts[1]
             return f"{{% for {item} in {arr} %}}"
@@ -167,7 +174,11 @@ def convert_template(src: str) -> str:
 
     out = re.sub(r"\{\{\s*each\s+([^}]+?)\s*\}\}", repl_each, out)
     out = re.sub(r"\{\{\s*/each\s*\}\}", "{% endfor %}", out)
-    out = re.sub(r"\{\{\s*if\s+([^}]+?)\s*\}\}", lambda m: "{% if " + _jsval_to_jinja(m.group(1).strip(), is_cond=True) + " %}", out)
+    out = re.sub(
+        r"\{\{\s*if\s+([^}]+?)\s*\}\}",
+        lambda m: "{% if " + _jsval_to_jinja(m.group(1).strip(), is_cond=True) + " %}",
+        out,
+    )
     out = re.sub(r"\{\{\s*else\s*\}\}", "{% else %}", out)
     out = re.sub(r"\{\{\s*/if\s*\}\}", "{% endif %}", out)
 
@@ -177,7 +188,7 @@ def convert_template(src: str) -> str:
     # 兜底：清理剩余普通 {{data.x}} 表达式中的 JS 残留（||、&&）
     def repl_plain(m):
         inner = m.group(1).strip()
-        if inner.startswith("each") or inner.startswith("if") or inner.startswith("else") or inner.startswith("/"):
+        if inner.startswith(("each", "if", "else", "/")):
             return m.group(0)
         return "{{ " + _jsval_to_jinja(inner) + " }}"
 

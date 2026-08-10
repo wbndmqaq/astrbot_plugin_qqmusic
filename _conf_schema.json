@@ -23,5 +23,6 @@
   "identifyPrefix": { "type": "string", "description": "识别提示前缀", "default": "识别：" },
   "qrLoginEnable": { "type": "bool", "description": "允许使用 #qqm登录 扫码登录命令", "default": true },
   "qqofficialAdapt": { "type": "bool", "description": "QQ 官方机器人专用适配：合并消息以规避被动回复额度、语音(silk)发送失败自动回退文件、跳过不支持的原生/自定义卡片", "default": true },
-  "renderListCard": { "type": "bool", "description": "将点歌/列表结果渲染为图片卡片（关闭则纯文本）", "default": true }
+  "renderListCard": { "type": "bool", "description": "将点歌/列表结果渲染为图片卡片（关闭则纯文本）", "default": true },
+  "sendTextInfo": { "type": "bool", "description": "投递音频时附带文本信息（歌名/歌手/音质）", "default": true }
 }

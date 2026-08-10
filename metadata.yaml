@@ -6,10 +6,16 @@ desc: |
   支持点歌、歌词、热搜、排行榜、推荐、电台、日推、收藏、歌手/专辑/歌单/评论、
   QQ 音乐分享卡片与链接自动解析、扫码登录、音质自适配降级、语音/群文件发送。
   需配合后端API使用（API 由用户自行解决）。
-version: v1.4.1
+version: v1.5.0
 author: wbndm
 repo: https://github.com/wbndmqaq/astrbot_plugin_qqmusic
 astrbot_version: ">=4.16,<5"
 support_platforms:
   - aiocqhttp
   - qq_official
+  - telegram
+  - dingtalk
+  - lark
+  - kook
+  - discord
+  - weixin_oc

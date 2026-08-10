@@ -27,7 +27,9 @@
 | 🎧 发现 | `#qqm评论 关键词` | 查看歌曲热门评论 |
 | 🔗 解析 | 群内发 QQ 音乐分享 / 链接 | 自动识别并下载播放 |
 | 🔗 解析 | 专辑 / 歌单 / 歌手链接 | 自动识别并展示歌曲列表 |
-| 🔐 登录 | `#qqm登录` | 扫码登录（主人） |
+| 🔐 登录 | `#qqm登录` | 无感扫码，一张 QQ 码覆盖 QQ / QQ音乐 App（主人，主通道） |
+| 🔐 登录 | `#qqm登录微信` | 无感扫码（微信码，备用） |
+| 🔐 登录 | `#qqm登录qq` | QQ音乐 App 扫码（MQTT 备用通道） |
 | 🔐 登录 | `#qqm绑定 qqmusic://...` | DeepLink 导入（主人） |
 | 🔐 登录 | `#qqm状态` / `#qms` | 登录状态卡片 |
 | 🔐 登录 | `#qqm登出` | 清除登录态（主人） |
@@ -81,11 +83,38 @@ QQ 群：[点击加入](https://qm.qq.com/q/GKxEVvF8Ua)
 
 ### 3. 登录
 
-主人发送 `#qqm登录` 扫码即可开始使用。
+主人发送 `#qqm登录` 无感扫码即可开始使用（一张 QQ 码，QQ / QQ音乐 App 通用；微信场景用 `#qqm登录微信`，QQ音乐 App 备用通道 `#qqm登录qq`）。
 
-## QQ 官方机器人适配
+## 卡片渲染
 
-自 v1.2.0 起支持 QQ 官方机器人（`qq_official` 适配器）
+自 v1.5.0 起卡片渲染改为**本地 Playwright**。首次使用需安装浏览器内核：
+
+```bash
+pip install playwright
+python -m playwright install chromium
+```
+
+渲染失败时会自动回退为纯文本展示，不影响点歌/解析功能。
+
+## 平台适配
+
+支持平台：`aiocqhttp`、`qq_official`、`telegram`、`dingtalk`、`lark`、`kook`、`discord`、`weixin_oc`。
+
+| 平台 | 文本/图片/卡片 | 语音 | 文件 | 原生/自定义音乐卡 |
+|---|---|---|---|---|
+| QQ 个人号 (aiocqhttp) | ✅ | ✅ | ✅ | ✅（send_api） |
+| QQ 官方 (qq_official) | ✅ | ✅（silk 转码，失败回退文件） | ✅ | ❌ |
+| 微信个人号 (weixin_oc) | ✅ | ❌ | ✅ | ❌ |
+| Telegram | ✅ | ✅ | ✅ | ❌ |
+| 飞书 (lark) | ✅ | ✅ | ✅ | ❌ |
+| 钉钉 (dingtalk) | ✅ | ✅ | ✅ | ❌ |
+| KOOK | ✅ | ✅ | ✅ | ❌ |
+| Discord | ✅ | ✅ | ✅ | ❌ |
+
+- 原生/自定义音乐卡依赖 OneBot `send_api`，仅 `aiocqhttp` 可用；其余平台自动跳过。
+- `qq_official` 为被动回复受限平台：文案与首个媒体合并发送以省被动回复额度，语音失败自动回退文件。
+- `weixin_oc`（微信个人号）出站不支持语音，自动跳过语音只发文件。
+- 卡片渲染为本地 Playwright，各平台均以图片形式发送。
 
 ## 项目结构
 
@@ -96,6 +125,7 @@ astrbot_plugin_qqmusic/
 ├── quality.py           # 音质档位与自适配降级
 ├── delivery.py          # 音频下载与语音/文件投递
 ├── cards.py             # 会话存储、隐私脱敏、卡片数据、文本兜底
+├── render.py            # 本地 Playwright 渲染（模板 → PNG）
 ├── tpl_adapter.py       # art-template → Jinja2 模板适配
 ├── updater.py           # git 自更新
 ├── _conf_schema.json    # 配置 Schema（管理面板）
