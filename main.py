@@ -984,17 +984,20 @@ class QQMusicPlugin(Star):
                 return
 
             # MV 详情卡（复用 qqmusic-detail 模板）
+            # 受限平台（qq_official 被动回复受限）把卡片并入视频同一条消息，省被动回复额度
+            from .delivery import _is_passive_limited, deliver_video
+
+            passive_limited = _is_passive_limited(event)
+            img_path = ""
             try:
                 card = cardlib.build_mv_card_data(mv_obj, cfg=self._cfg())
-                url_img = await self._render_card(event, card, "qqmusic-detail")
-                if url_img:
-                    await self._send_chain(event, Image.fromFileSystem(url_img))
-                else:
+                img_path = await self._render_card(event, card, "qqmusic-detail") or ""
+                if img_path and not passive_limited:
+                    await self._send_chain(event, Image.fromFileSystem(img_path))
+                elif not img_path:
                     await self._reply(event, cardlib.format_mv_text(mv_obj))
             except Exception:
                 await self._reply(event, cardlib.format_mv_text(mv_obj))
-
-            from .delivery import deliver_video
 
             ret = await deliver_video(
                 self,
@@ -1004,6 +1007,7 @@ class QQMusicPlugin(Star):
                 cfg=self._cfg(),
                 plugin_dir=PLUGIN_DIR,
                 download=is_dl,
+                extra=[Image.fromFileSystem(img_path)] if (img_path and passive_limited) else None,
             )
             if not ret.get("ok"):
                 await self._reply(event, f"视频发送失败，可点击查看：{url}")

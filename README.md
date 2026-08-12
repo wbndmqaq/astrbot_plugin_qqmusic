@@ -104,17 +104,18 @@ python -m playwright install chromium
 
 支持平台：`aiocqhttp`、`qq_official`、`telegram`、`dingtalk`、`lark`、`kook`、`discord`、`weixin_oc`。
 
-| 平台 | 文本/图片/卡片 | 语音 | 文件 | 原生/自定义音乐卡 |
-|---|---|---|---|---|
-| QQ 个人号 (aiocqhttp) | ✅ | ✅ | ✅ | ✅（send_api） |
-| QQ 官方 (qq_official) | ✅ | ✅（silk 转码，失败回退文件） | ✅ | ❌ |
-| 微信个人号 (weixin_oc) | ✅ | ❌ | ✅ | ❌ |
-| Telegram | ✅ | ✅ | ✅ | ❌ |
-| 飞书 (lark) | ✅ | ✅ | ✅ | ❌ |
-| 钉钉 (dingtalk) | ✅ | ✅ | ✅ | ❌ |
-| KOOK | ✅ | ✅ | ✅ | ❌ |
-| Discord | ✅ | ✅ | ✅ | ❌ |
+| 平台 | 文本/图片/卡片 | 语音 | 文件 | 视频 (MV) | 原生/自定义音乐卡 |
+|---|---|---|---|---|---|
+| QQ 个人号 (aiocqhttp) | ✅ | ✅ | ✅ | ✅ | ✅（send_api） |
+| QQ 官方 (qq_official) | ✅ | ✅（silk 转码，失败回退文件） | ✅ | ✅（落盘发送，卡片与视频合并省额度） | ❌ |
+| 微信个人号 (weixin_oc) | ✅ | ❌ | ✅ | ✅ | ❌ |
+| Telegram | ✅ | ✅ | ✅ | ✅ | ❌ |
+| 飞书 (lark) | ✅ | ✅ | ✅ | ✅ | ❌ |
+| 钉钉 (dingtalk) | ✅ | ✅ | ✅ | ✅ | ❌ |
+| KOOK | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Discord | ✅ | ✅ | ✅ | ✅ | ❌ |
 
+- 视频（MV）发送降级链：`Video.fromURL` 直发 → 落盘 `Video` → `File` 文件 → 链接文本；受限平台跳过 URL 直发直接落盘。
 - 原生/自定义音乐卡依赖 OneBot `send_api`，仅 `aiocqhttp` 可用；其余平台自动跳过。
 - `qq_official` 为被动回复受限平台：文案与首个媒体合并发送以省被动回复额度，语音失败自动回退文件。
 - `weixin_oc`（微信个人号）出站不支持语音，自动跳过语音只发文件。
