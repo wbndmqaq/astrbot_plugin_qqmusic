@@ -1010,7 +1010,31 @@ class QQMusicPlugin(Star):
                 extra=[Image.fromFileSystem(img_path)] if (img_path and passive_limited) else None,
             )
             if not ret.get("ok"):
-                await self._reply(event, f"视频发送失败，可点击查看：{url}")
+                # 视频/文件均失败：本地文件还在则再试一次发下载文件，否则回退链接
+                fp = ret.get("filePath") or ""
+                sent_file = False
+                if fp and os.path.exists(fp):
+                    from .delivery import _schedule_cleanup
+
+                    title_f = mv_obj.get("mvtitle") or mv_obj.get("name") or "MV"
+                    try:
+                        from astrbot.api.message_components import File as _File
+
+                        await self._send_chain(
+                            event,
+                            _File(
+                                re.sub(r'[\\/:*?"<>|]', "", str(title_f))[:30] + ".mp4",
+                                file=fp,
+                            ),
+                        )
+                        sent_file = True
+                        _schedule_cleanup(fp, int(self._cfg().get("keepFileSec", 120)))
+                    except Exception:
+                        pass
+                if sent_file:
+                    await self._reply(event, "视频消息发送失败，已改发下载文件")
+                else:
+                    await self._reply(event, f"视频发送失败，可点击查看：{url}")
             event.stop_event()
             return
 

@@ -400,11 +400,12 @@ async def deliver_video(
 
     - 受限平台（qq_official 被动回复受限）：跳过 URL 直发（官方 API 不支持外链视频直发），
       直接落盘发文件；extra（如 MV 详情卡图片）并入同一条消息省被动回复额度
-    - 其余平台：Video.fromURL 直发 → 失败落盘 → Video.fromFileSystem
-    - 全部失败：File 组件发 mp4 文件（所有平台都支持文件）
-    - 最终兜底由调用方发 URL 文本
+    - 播放（其余平台）：Video.fromURL 直发 → 失败落盘 → 发下载文件（File，全平台支持）
+    - 下载：落盘后直接发下载文件（File 主发送）
+    - File 也失败：再试 Video.fromFileSystem（内嵌视频）
+    - 全部失败：返回 filePath 供调用方兜底，最终回退 URL 文本
 
-    返回 {"ok": bool, "reason": str, "url": str}
+    返回 {"ok": bool, "reason": str, "url": str, "filePath": str}
     """
     from astrbot.api.message_components import File, Video
 
@@ -413,6 +414,7 @@ async def deliver_video(
     local_path = ""
     keep_sec = int(cfg.get("keepFileSec", 120))
     passive_limited = _is_passive_limited(event)
+    file_name = _clean_track_text(title, 30) + ".mp4"
 
     async def _download() -> str:
         save_dir = get_temp_dir(cfg, plugin_dir)
@@ -447,21 +449,19 @@ async def deliver_video(
             plugin._log_warn(f"MV 落盘失败: {err}")
 
     if local_path:
+        # 视频发送失败 / 下载模式：发下载文件（File 全平台支持）
         try:
-            await plugin._send_chain(event, *extra, Video.fromFileSystem(local_path))
+            await plugin._send_chain(event, *extra, File(file_name, file=local_path))
             _schedule_cleanup(local_path, keep_sec)
-            return {"ok": True, "reason": "file", "url": url}
+            return {"ok": True, "reason": "file", "url": url, "filePath": local_path}
         except Exception as err:
-            plugin._log_warn(f"MV 视频发送失败，回退文件: {err}")
+            plugin._log_warn(f"MV 文件发送失败，重试视频组件: {err}")
             try:
-                # 所有平台都支持文件：视频组件失败时以 mp4 文件投递
-                await plugin._send_chain(
-                    event, *extra, File(_clean_track_text(title, 30) + ".mp4", file=local_path)
-                )
+                await plugin._send_chain(event, *extra, Video.fromFileSystem(local_path))
                 _schedule_cleanup(local_path, keep_sec)
-                return {"ok": True, "reason": "file-fallback", "url": url}
+                return {"ok": True, "reason": "video-file", "url": url, "filePath": local_path}
             except Exception as err2:
-                plugin._log_warn(f"MV 文件发送失败: {err2}")
+                plugin._log_warn(f"MV 视频组件发送也失败: {err2}")
                 _schedule_cleanup(local_path, 10)
 
-    return {"ok": False, "reason": "send_fail", "url": url}
+    return {"ok": False, "reason": "send_fail", "url": url, "filePath": local_path}

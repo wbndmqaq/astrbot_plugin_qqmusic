@@ -115,7 +115,7 @@ python -m playwright install chromium
 | KOOK | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Discord | ✅ | ✅ | ✅ | ✅ | ❌ |
 
-- 视频（MV）发送降级链：`Video.fromURL` 直发 → 落盘 `Video` → `File` 文件 → 链接文本；受限平台跳过 URL 直发直接落盘。
+- 视频（MV）发送降级链：`Video.fromURL` 直发 → 失败落盘发**下载文件**（`File`，全平台支持）→ `Video` 组件重试 → 链接文本；下载命令直接发文件；受限平台跳过 URL 直发。
 - 原生/自定义音乐卡依赖 OneBot `send_api`，仅 `aiocqhttp` 可用；其余平台自动跳过。
 - `qq_official` 为被动回复受限平台：文案与首个媒体合并发送以省被动回复额度，语音失败自动回退文件。
 - `weixin_oc`（微信个人号）出站不支持语音，自动跳过语音只发文件。
