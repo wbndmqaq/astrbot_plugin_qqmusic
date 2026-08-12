@@ -501,7 +501,7 @@
               </div>
               <div class="song-right">
                 {{if song.duration}}<div class="song-duration">{{song.duration}}</div>{{else}}<div class="song-duration"></div>{{/if}}
-                <div class="song-tag {{song.payplay ? '' : 'free'}}">{{song.payplay ? '付费' : '免费'}}</div>
+                <div class="song-tag {{song.payplay ? '' : 'free'}}">{{song.payplay ? '付费' : '免费'}}{{song.hasMv ? ' · 🎬' : ''}}</div>
               </div>
             </div>
             {{/each}}
@@ -515,26 +515,16 @@
             <div class="section-tag">快捷</div>
           </div>
           <div class="cmd-list">
+            {{each data.commands c}}
             <div class="cmd">
               <div class="cmd-main">
-                <div class="cmd-name">#qqm听序号</div>
-                <div class="cmd-desc">播放当前列表中的指定歌曲</div>
+                <div class="cmd-name">{{c.name}}</div>
+                <div class="cmd-desc">{{c.desc || ''}}</div>
               </div>
-              <div class="cmd-example">#qqm听1</div>
+              <div class="cmd-example">{{c.example}}</div>
             </div>
-            <div class="cmd">
-              <div class="cmd-main">
-                <div class="cmd-name">#qqm歌词 序号</div>
-                <div class="cmd-desc">查看指定歌曲的纯文本歌词</div>
-              </div>
-              <div class="cmd-example">#qqm歌词1</div>
-            </div>
+            {{/each}}
           </div>
-        </div>
-
-        <div class="tips">
-          <div class="tips-title"><span>!</span>小提示</div>
-          <div class="tips-body">{{data.tip || '发送 #qqm听序号 播放（会话内也可 #听序号）；列表约 10 分钟内有效。'}}</div>
         </div>
 
         <div class="footer">

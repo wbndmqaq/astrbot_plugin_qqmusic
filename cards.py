@@ -113,10 +113,57 @@ def format_list_text(lst: list) -> str:
     lines = []
     for i, s in enumerate(lst):
         pay = " [付费]" if s.get("payplay") else ""
+        mv = " 🎬" if s.get("mvVid") else ""
         dur = f" ({s['duration']})" if s.get("duration") else ""
         singer = s.get("singerName") or s.get("singer") or ""
-        lines.append(f"{i + 1}. {s.get('songName', '')} - {singer}{pay}{dur}")
-    return "♫ QQ音乐点歌结果（#qqm听序号 或 #听序号）\n" + "\n".join(lines)
+        lines.append(f"{i + 1}. {s.get('songName', '')} - {singer}{pay}{mv}{dur}")
+    return (
+        "♫ QQ音乐点歌结果（#qqm听序号 或 #听序号；🎬=有MV，可 #qqmMV 播放 序号）\n"
+        + "\n".join(lines)
+    )
+
+
+def format_mv_list_text(lst: list) -> str:
+    lines = []
+    for i, m in enumerate(lst):
+        name = m.get("mvtitle") or m.get("name") or m.get("songName") or "未知"
+        singer = m.get("singerName") or "未知"
+        lines.append(f"{i + 1}. {name} - {singer}")
+    return f"♫ MV 搜索结果（发 #qqmMV 播放 / 下载 序号）\n" + "\n".join(lines)
+
+
+def _fmt_count(n) -> str:
+    """播放量友好格式化：1.2亿 / 12018万 / 9999"""
+    try:
+        v = float(n or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not v:
+        return ""
+    if v >= 100000000:
+        return f"{v / 100000000:.1f}".rstrip("0").rstrip(".") + "亿"
+    if v >= 10000:
+        return f"{v / 10000:.1f}".rstrip("0").rstrip(".") + "万"
+    return str(int(v))
+
+
+def format_mv_text(mv: dict) -> str:
+    title = mv.get("mvtitle") or mv.get("name") or mv.get("songName") or "MV"
+    singer = mv.get("singerName") or "未知歌手"
+    lines = [f"🎬 MV：{title} - {singer}"]
+    dur = mv.get("duration")
+    if dur:
+        if isinstance(dur, str) and ":" in str(dur):
+            lines.append(f"时长：{dur}")  # 已是 m:ss 形式（来自卡片数据）
+        else:
+            sec = int(dur)
+            if sec > 0:
+                lines.append(f"时长：{sec // 60}:{sec % 60:02d}")
+    if mv.get("listennum"):
+        lines.append(f"累计播放：{_fmt_count(mv.get('listennum'))}")
+    if mv.get("pubdate"):
+        lines.append(f"发行：{mv['pubdate']}")
+    return "\n".join(lines)
 
 
 def format_hot_text(items: list) -> str:
@@ -192,6 +239,36 @@ def build_list_card_data(
 ) -> dict:
     cfg = cfg or {}
     options = options or {}
+    has_mv = any(bool(s.get("mvVid")) for s in songs)
+    # 常用指令：原卡片底部「小提示」的内容并入此列表
+    commands = [
+        {
+            "name": "#qqm听序号",
+            "desc": options.get("tip")
+            or "播放当前列表中的指定歌曲（会话内也可 #听序号）",
+            "example": "#qqm听1",
+        },
+        {
+            "name": "#qqm歌词 序号",
+            "desc": "查看指定歌曲的纯文本歌词",
+            "example": "#qqm歌词1",
+        },
+    ]
+    if has_mv:
+        commands.append(
+            {
+                "name": "#qqmMV 播放 序号",
+                "desc": "播放 / 下载该曲 MV（列表带 🎬 即是有 MV 的歌曲）",
+                "example": "#qqmMV 播放 1",
+            }
+        )
+    commands.append(
+        {
+            "name": "列表有效期",
+            "desc": "本列表约 10 分钟内有效，过期请重新搜索",
+            "example": "#qqm点歌 关键词",
+        }
+    )
     return {
         "keyword": keyword or "歌曲列表",
         "total": len(songs),
@@ -206,11 +283,12 @@ def build_list_card_data(
                 "cover": s.get("cover") or "",
                 "duration": s.get("duration") or "",
                 "payplay": bool(s.get("payplay")),
+                "hasMv": bool(s.get("mvVid")),
             }
             for i, s in enumerate(songs)
         ],
-        "tip": options.get("tip")
-        or "发送 #qqm听序号 播放（会话内也可 #听序号）；列表约 10 分钟内有效",
+        "hasMv": has_mv,
+        "commands": commands,
     }
 
 
@@ -383,10 +461,45 @@ def build_detail_card_data(
         "duration": song.get("duration") or "",
         "qualityLabel": quality_label or "",
         "payplay": is_vip,
+        "showPay": True,
         "source": source_text,
         "tip": f"正在下载并发送语音（{quality_label or '默认音质'}）..."
         if has_url
         else "未获取到播放链接",
+    }
+
+
+def build_mv_card_data(mv: dict, cfg: dict | None = None) -> dict:
+    """MV 详情卡片 - 复用 qqmusic-detail 模板；按 MV 语义映射（无专辑/无音质/显示时长）"""
+    cfg = cfg or {}
+    title = mv.get("mvtitle") or mv.get("name") or mv.get("songName") or "MV"
+    singer = mv.get("singerName") or mv.get("singer_name") or ""
+    play = int(mv.get("listennum") or mv.get("listenNum") or 0)
+    pubdate = mv.get("pubdate") or mv.get("pub_date") or mv.get("publish_date") or ""
+    # 时长：秒 → m:ss
+    duration = ""
+    sec = int(mv.get("duration") or mv.get("durationSec") or 0)
+    if sec > 0:
+        duration = f"{sec // 60}:{sec % 60:02d}"
+    tip_parts = [
+        f"累计播放 {_fmt_count(play)}" if play else "",
+        f"发行 {pubdate}" if pubdate else "",
+        "发 #qqmMV 播放/下载 序号",
+    ]
+    return {
+        "songName": title,
+        "singerName": singer or "未知歌手",
+        "albumName": "",  # MV 无专辑概念，发行日期进 tip
+        "cover": mv.get("cover") or mv.get("picurl") or "",
+        "duration": duration,
+        "qualityLabel": "",  # 音质概念不适用于 MV
+        "payplay": False,
+        "showPay": False,  # 不显示 付费/免费 徽章
+        "source": "MV",
+        "tip": " · ".join(x for x in tip_parts if x) or "发 #qqmMV 播放/下载 序号",
+        "vid": mv.get("vid") or "",
+        "listennum": play,
+        "apiHint": api_hint_for(cfg),
     }
 
 
@@ -405,7 +518,7 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
         stat_mode = "待机"
     return {
         "version": f"v{version}",
-        "statCommands": "25+",
+        "statCommands": "30+",
         "statQuality": quality,
         "statMode": stat_mode,
         "apiHint": api_hint_for(cfg),
@@ -443,6 +556,32 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
                 ],
             },
             {
+                "title": "MV 专区",
+                "tag": "视频",
+                "items": [
+                    {
+                        "name": "MV 搜索",
+                        "desc": "搜索 MV 并展示列表",
+                        "example": "#qqmMV 搜索 周杰伦",
+                    },
+                    {
+                        "name": "MV 播放",
+                        "desc": "播放列表第 N 个 MV（无参数=本曲 MV）",
+                        "example": "#qqmMV 播放 1",
+                    },
+                    {
+                        "name": "MV 下载",
+                        "desc": "下载列表第 N 个 MV",
+                        "example": "#qqmMV 下载 1",
+                    },
+                    {
+                        "name": "MV 分类",
+                        "desc": "按分类 / 标签浏览 MV",
+                        "example": "#qqmMV",
+                    },
+                ],
+            },
+            {
                 "title": "发现音乐",
                 "tag": "探索",
                 "items": [
@@ -450,6 +589,11 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
                         "name": "排行榜",
                         "desc": "查看各大榜单歌曲",
                         "example": "#qqm排行 飙升",
+                    },
+                    {
+                        "name": "新歌速递",
+                        "desc": "最新歌曲（1内地 2欧美 3日本 4韩国 5最新 6港台）",
+                        "example": "#qqm新歌",
                     },
                     {
                         "name": "推荐歌单",

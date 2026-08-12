@@ -71,6 +71,8 @@ def build_music_filename(*, singer: str, title: str, ext: str = "") -> str:
 
 def _ext_for_quality(quality_hint: str, url: str) -> str:
     q = (quality_hint or "").lower()
+    if q == "video":
+        return ".mp4"
     if q in ("flac", "hires", "master", "atmos", "atmos_master", "ape"):
         return ".flac" if q != "ape" else ".ape"
     if q in ("m4a",):
@@ -381,3 +383,54 @@ async def deliver_song(
         await plugin._send_chain(event, plugin._plain(pending_text))
 
     return {"ok": True, "downloaded": True}
+
+
+async def deliver_video(
+    plugin, event, mv: dict, url: str, *, cfg: dict, plugin_dir: str, download: bool = False
+) -> dict:
+    """发送 MV 视频：下载 时先落盘再发文件；播放 时优先直发 URL，失败再落盘；最终回退 URL 文本。
+
+    返回 {"ok": bool, "reason": str, "url": str}
+    """
+    from astrbot.api.message_components import Video
+
+    title = mv.get("mvtitle") or mv.get("name") or mv.get("songName") or "MV"
+    local_path = ""
+    keep_sec = int(cfg.get("keepFileSec", 120))
+
+    async def _download() -> str:
+        save_dir = get_temp_dir(cfg, plugin_dir)
+        timeout = int(cfg.get("downloadTimeout") or 120000)
+        dl = await download_audio(
+            url, save_dir, "mv_" + _clean_track_text(title, 30), timeout, "video"
+        )
+        return dl["filePath"]
+
+    if download:
+        try:
+            local_path = await _download()
+        except Exception as err:
+            plugin._log_warn(f"MV 下载失败: {err}")
+
+    if not local_path and not download:
+        # 播放：直发 URL
+        try:
+            await plugin._send_chain(event, Video.fromURL(url))
+            return {"ok": True, "reason": "url", "url": url}
+        except Exception as err:
+            plugin._log_warn(f"MV 直发 URL 失败，尝试落盘: {err}")
+            try:
+                local_path = await _download()
+            except Exception as err2:
+                plugin._log_warn(f"MV 落盘失败: {err2}")
+
+    if local_path:
+        try:
+            await plugin._send_chain(event, Video.fromFileSystem(local_path))
+            _schedule_cleanup(local_path, keep_sec)
+            return {"ok": True, "reason": "file", "url": url}
+        except Exception as err:
+            plugin._log_warn(f"MV 文件发送失败: {err}")
+            _schedule_cleanup(local_path, 10)
+
+    return {"ok": False, "reason": "send_fail", "url": url}

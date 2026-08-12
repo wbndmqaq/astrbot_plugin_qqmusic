@@ -205,7 +205,11 @@ def singer_text(item: dict) -> str:
         if names:
             return " / ".join(names)
     return str(
-        item.get("singername") or item.get("singerName") or item.get("singer") or ""
+        item.get("singername")
+        or item.get("singerName")
+        or item.get("singer_name")
+        or item.get("singer")
+        or ""
     )
 
 
@@ -314,6 +318,26 @@ def _normalize_search_item(item: dict, idx: int = 0) -> dict | None:
 async def song_detail(songmid: str, user_key: str = "") -> Any:
     body = await request("/song", {"songmid": songmid}, "get", user_key)
     return (body or {}).get("data")
+
+
+async def song_info_batch(ids: list, *, user_key: str = "") -> list:
+    """批量查歌曲详情（/song/info，一次请求），返回带 mvVid 的规范化歌曲（供列表卡 🎬 徽标）。"""
+    ids = [str(i) for i in (ids or []) if str(i)]
+    if not ids:
+        return []
+    body = await request("/song/info", {"ids": ",".join(ids)}, "get", user_key)
+    raw_list = unwrap_data(body).get("list") or []
+    out = []
+    for idx, item in enumerate(raw_list):
+        norm = _normalize_search_item(item, idx)
+        if norm:
+            track = item.get("track_info") if isinstance(item, dict) else None
+            mv_vid = ""
+            if isinstance(track, dict) and isinstance(track.get("mv"), dict):
+                mv_vid = str(track["mv"].get("vid") or "")
+            norm["mvVid"] = mv_vid
+            out.append(norm)
+    return out
 
 
 def _map_song_url_body(body: dict, type_: str, real_media: str) -> dict:
@@ -447,6 +471,7 @@ async def song_url_best(
     try:
         detail = await song_detail(songmid, user_key)
         file = (detail or {}).get("track_info") or {}
+        track = file if isinstance(file, dict) else {}
         file = file.get("file") if isinstance(file, dict) else None
         if not isinstance(file, dict):
             file = (detail or {}).get("file") if isinstance(detail, dict) else None
@@ -460,7 +485,16 @@ async def song_url_best(
             size_info = file
             predicted = pick_best_available_quality(file, preferred)
     except Exception:
+        track = {}
         pass
+
+    # 歌曲 MV vid（track_info.mv.vid），供「本曲 MV」操作与点歌卡 🎬 徽标
+    mv_vid = ""
+    try:
+        if isinstance(track, dict) and isinstance(track.get("mv"), dict):
+            mv_vid = str(track["mv"].get("vid") or "")
+    except Exception:
+        mv_vid = ""
 
     last_err: ApiError | Exception | None = None
     tried: list[str] = []
@@ -508,6 +542,7 @@ async def song_url_best(
                 predicted=predicted,
                 tried=tried,
                 playChannel=r.get("playChannel"),
+                mvVid=mv_vid,
             )
             return r
         except Exception as e:  # ApiError 也在此列，统一记录后继续下一档
@@ -580,6 +615,166 @@ async def top_detail(
         params["period"] = period
     body = await request("/top", params, "get", user_key)
     return (body or {}).get("data") or body
+
+
+# ──────────── 新歌速递 ────────────
+
+
+async def new_songs(type_: int = 5, *, num: int = 20, user_key: str = "") -> list:
+    """新歌速递（/song/new）：type 1 内地 / 2 欧美 / 3 日本 / 4 韩国 / 5 最新 / 6 港台，默认 5"""
+    body = await request(
+        "/song/new", {"type": int(type_), "num": int(num)}, "get", user_key
+    )
+    raw_list = unwrap_data(body).get("list") or []
+    return [
+        n
+        for n in (_normalize_search_item(it, i) for i, it in enumerate(raw_list))
+        if n
+    ]
+
+
+# ──────────── MV ────────────
+
+
+def normalize_mv_item(item: dict, idx: int = 0) -> dict | None:
+    """MV 条目规范化：兼容 /mv/tag（vid/mvtitle/singer_name/picurl/publish_date/play_count）
+    与 /search t=12（v_id/mv_name/mv_pic_url）两种返回结构。"""
+    if not isinstance(item, dict):
+        return None
+    vid = item.get("vid") or item.get("v_id") or ""
+    if not vid:
+        return None
+    title = (
+        item.get("mv_name")
+        or item.get("mvname")
+        or item.get("name")
+        or item.get("mvtitle")
+        or item.get("title")
+        or item.get("songname")
+        or ""
+    )
+    return {
+        "index": idx + 1,
+        "vid": vid,
+        "mvtitle": title,
+        "name": title,
+        "singerName": singer_text(item),
+        "cover": (
+            item.get("mv_pic_url")
+            or item.get("pic")
+            or item.get("picurl")
+            or item.get("cover")
+            or ""
+        ),
+        "pubdate": (
+            item.get("publish_date")
+            or item.get("pubdate")
+            or item.get("pub_date")
+            or item.get("publictime")
+            or ""
+        ),
+        "listennum": int(
+            _safe_num(
+                item.get("play_count")
+                or item.get("listennum")
+                or item.get("listenNum")
+                or item.get("playcnt")
+                or item.get("cnt")
+                or 0
+            )
+        ),
+        "duration": int(
+            _safe_num(
+                item.get("duration")
+                or item.get("durationSec")
+                or item.get("mv_duration")
+                or 0
+            )
+        ),
+        "raw": item,
+    }
+
+
+async def search_mv(
+    keyword: str, *, page_no: int = 1, page_size: int = 10, user_key: str = ""
+) -> list:
+    """搜索 MV（/search t=12）"""
+    body = await request(
+        "/search",
+        {"key": keyword, "t": 12, "pageNo": page_no, "pageSize": page_size},
+        "get",
+        user_key,
+    )
+    raw_list = unwrap_data(body).get("list") or []
+    return [n for n in (normalize_mv_item(it, i) for i, it in enumerate(raw_list)) if n]
+
+
+async def mv_category(user_key: str = "") -> dict:
+    """MV 分类（/mv/category）"""
+    body = await request("/mv/category", {}, "get", user_key)
+    d = unwrap_data(body)
+    return {
+        "area": d.get("area") if isinstance(d.get("area"), list) else [],
+        "version": d.get("version") if isinstance(d.get("version"), list) else [],
+        "list": d.get("list") if isinstance(d.get("list"), list) else [],
+    }
+
+
+async def mv_by_tag(
+    tag_id, *, page_no: int = 1, page_size: int = 20, user_key: str = ""
+) -> dict:
+    """按分类标签浏览 MV（/mv/tag）"""
+    body = await request(
+        "/mv/tag",
+        {"tagId": tag_id, "pageNo": page_no, "pageSize": page_size},
+        "get",
+        user_key,
+    )
+    d = unwrap_data(body)
+    raw = d.get("list") if isinstance(d.get("list"), list) else (d.get("mvlist") if isinstance(d.get("mvlist"), list) else [])
+    return {
+        "list": [n for n in (normalize_mv_item(it, i) for i, it in enumerate(raw)) if n],
+        "total": int(_safe_num(d.get("total") or 0)),
+    }
+
+
+async def mv_url(vid: str, user_key: str = "") -> str:
+    """获取 MV 播放地址（/mv/url）。仅取 code=0 可用条目，倒序优先体积小的，提高发送成功率。"""
+    if not vid:
+        return ""
+    body = await request("/mv/url", {"id": vid}, "get", user_key)
+    d = unwrap_data(body)
+    mp4s = d.get("mp4") if isinstance(d.get("mp4"), list) else []
+    usable = [m for m in mp4s if isinstance(m, dict) and _safe_num(m.get("code")) == 0]
+    src = ""
+    for m in reversed(usable):
+        for key in ("freeflow_url", "comm_url"):
+            arr = m.get(key)
+            if isinstance(arr, list):
+                for u in arr:
+                    if isinstance(u, str) and u.strip():
+                        src = u
+                        break
+                if src:
+                    break
+        if src:
+            break
+        base = ""
+        if isinstance(m.get("url"), list):
+            for u in m["url"]:
+                if isinstance(u, str) and u.strip():
+                    base = u
+                    break
+        url_path = m.get("urlPath")
+        if base and url_path:
+            p = str(url_path)
+            src = base.rstrip("/") + (p if p.startswith("/") else f"/{p}")
+            break
+        if base and len(base) > 10:
+            src = base
+            break
+    url = str(src or "").strip()
+    return url.replace("http://", "https://", 1) if url else ""
 
 
 # ──────────── 推荐 ────────────
@@ -719,12 +914,50 @@ async def user_diss_list(
     }
 
 
-async def daily_recommend(**opts) -> dict:
-    return await user_diss_list(202, **opts)
+def _diss_payload(body) -> dict:
+    """把 API 专用端点返回的 { list, title, desc } 转成插件侧 { songs, title, desc }"""
+    d = unwrap_data(body)
+    lst = d.get("list") if isinstance(d.get("list"), list) else []
+    songs = [
+        n for n in (_normalize_search_item(it, i) for i, it in enumerate(lst)) if n
+    ]
+    return {"songs": songs, "title": d.get("title") or "", "desc": d.get("desc") or ""}
 
 
-async def user_favorites(**opts) -> dict:
-    return await user_diss_list(201, **opts)
+async def daily_recommend(
+    *, song_begin: int = 0, song_num: int = 30, user_key: str = ""
+) -> dict:
+    """每日推荐：优先 /recommend/daily 专用端点，失败回退 /cgi disslist(202)"""
+    try:
+        body = await request(
+            "/recommend/daily",
+            {"songBegin": song_begin, "num": song_num},
+            "get",
+            user_key,
+        )
+        return _diss_payload(body)
+    except ApiError:
+        return await user_diss_list(
+            202, song_begin=song_begin, song_num=song_num, user_key=user_key
+        )
+
+
+async def user_favorites(
+    *, song_begin: int = 0, song_num: int = 30, user_key: str = ""
+) -> dict:
+    """我的收藏：优先 /user/liked 专用端点，失败回退 /cgi disslist(201)"""
+    try:
+        body = await request(
+            "/user/liked",
+            {"songBegin": song_begin, "num": song_num},
+            "get",
+            user_key,
+        )
+        return _diss_payload(body)
+    except ApiError:
+        return await user_diss_list(
+            201, song_begin=song_begin, song_num=song_num, user_key=user_key
+        )
 
 
 # ──────────── 搜索扩展 ────────────

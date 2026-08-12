@@ -157,7 +157,7 @@
         <div class="info">
           <div class="tag-row">
             {{if data.qualityLabel}}<div class="tag">{{data.qualityLabel}}</div>{{/if}}
-            {{if data.payplay}}<div class="tag pay">付费</div>{{else}}<div class="tag">免费</div>{{/if}}
+            {{if data.showPay}}{{if data.payplay}}<div class="tag pay">付费</div>{{else}}<div class="tag">免费</div>{{/if}}{{/if}}
             {{if data.source}}<div class="tag">{{data.source}}</div>{{/if}}
           </div>
           <div class="song-name">{{data.songName || '未知'}}</div>
