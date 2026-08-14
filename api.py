@@ -8,6 +8,7 @@ import aiohttp
 
 from .quality import (
     QUALITY_LABEL,
+    build_degrade_note,
     is_quality_size_ok,
     pick_best_available_quality,
     quality_candidates,
@@ -486,7 +487,6 @@ async def song_url_best(
             predicted = pick_best_available_quality(file, preferred)
     except Exception:
         track = {}
-        pass
 
     # 歌曲 MV vid（track_info.mv.vid），供「本曲 MV」操作与点歌卡 🎬 徽标
     mv_vid = ""
@@ -543,6 +543,7 @@ async def song_url_best(
                 tried=tried,
                 playChannel=r.get("playChannel"),
                 mvVid=mv_vid,
+                degradeNote=build_degrade_note(preferred, type_, tried),
             )
             return r
         except Exception as e:  # ApiError 也在此列，统一记录后继续下一档
@@ -1220,9 +1221,14 @@ def parse_qqmusic_ids(text: str = "") -> dict:
     s = str(text or "")
     out = {"songmid": "", "songid": "", "albummid": "", "media_mid": ""}
 
+    # songmid / song_mid / songMid / mid 参数变体，或 /songDetail|/song|/playsong.html 路径
     m = (
-        re.search(r"[?&]songmid=([A-Za-z0-9]+)", s, re.IGNORECASE)
-        or re.search(r"/songDetail/([A-Za-z0-9]+)", s, re.IGNORECASE)
+        re.search(r"[?&](?:songmid|song_mid|songMid|mid)=([A-Za-z0-9]{5,})", s, re.IGNORECASE)
+        or re.search(
+            r"/(?:songDetail|song|playsong\.html)\/?[?#]*([A-Za-z0-9]{10,})",
+            s,
+            re.IGNORECASE,
+        )
         or re.search(r"/song/([A-Za-z0-9]{14})", s, re.IGNORECASE)
     )
     if m:
@@ -1235,7 +1241,8 @@ def parse_qqmusic_ids(text: str = "") -> dict:
     m = re.search(r"[?&]albummid=([A-Za-z0-9]+)", s, re.IGNORECASE)
     if m:
         out["albummid"] = m.group(1)
-    m = re.search(r"[?&]media_mid=([A-Za-z0-9]+)", s, re.IGNORECASE)
+    # media_mid / mediaMid / mediaid 参数变体
+    m = re.search(r"[?&](?:media_mid|mediaMid|mediaid)=([A-Za-z0-9]+)", s, re.IGNORECASE)
     if m:
         out["media_mid"] = m.group(1)
     return out

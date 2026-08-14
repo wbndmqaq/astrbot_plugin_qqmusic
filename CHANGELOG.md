@@ -1,6 +1,30 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v1.7.0] - 对齐 JS 版语音压缩/禁用高清语音/音质降级提示/链接解析加固
+
+*   **🔇 禁用高清语音开关**: 新增配置 `disableHighQualityVocal`（默认关）。PC QQ 播放不了 44.1k 立体声语音时开启，
+    语音改发 mono16k/32k 低音质（QQ 语音标准规格），`#qqm设置` 卡片发送区显示开关状态。
+*   **🗜 语音 ffmpeg 压缩**: FLAC 等高音质文件直接作语音(Record)会被协议端以体积/格式拒绝，新增
+    `prepare_vocal_file` 先 ffmpeg 压成紧凑 mp3（44100Hz/立体声），体积 ≤5MB 且已在直传白名单时跳过转码；
+    压缩产物与原始文件同样纳入定时清理，temp 目录不累积。ffmpeg 缺失时自动回退原始文件，功能不受影响。
+*   **📁 OneBot 群文件改传压缩版**: aiocqhttp（NapCat/LLOneBot 等 NTQQ 系）群文件对 `.flac` 常报「未知文件类型或路径不存在」，
+    与语音压缩解耦——只要语音开启或 OneBot 群文件开启即生成压缩 mp3，OneBot 群文件优先传压缩版（`_压缩版.mp3`），
+    其余平台仍保留原始高音质文件。自定义音乐卡补发 `singer` 字段；原生卡失败时自动降级为自定义卡（不再双卡连发）。
+*   **🚀 QQ 官方分片文件上传**: 对齐 AstrBot 4.27.3 `QQOfficialChunkedUploader`——qq_official 下 >10MB 大文件
+    （FLAC 等无损/长时音频、MV 视频）自动发原始文件走适配器分片上传，修复旧版大文件无法发送的问题。
+    新增配置 `qqofficialChunkedUpload`（默认开）；AstrBot <4.27.3 或关闭时自动检测并回退压缩 mp3 兜底，
+    不再直发必败的大文件。版本能力经 `astrbot.__version__ ≥ 4.27.3` 判定。
+*   **📉 音质降级提示**: 显式请求 `hires/master` 等高音质被降级时，详情卡直接标注原因
+    （`API 未返回链接（通常需绿钻会员）` / `该歌曲未提供此音质` / `播放链接不可用`），对齐 JS 版 `buildDegradeNote`。
+*   **🔗 链接解析加固**（对齐 JS 版 `875b1af`）:
+    *   URL 提取正则排除中文标点，不再吞链接后的「，很好听」之类；
+    *   `c6.y.qq.com` 移动端短链跟随重定向拿最终 songDetail 链接，重定向仅允许 QQ 音乐域名白名单
+        （y.qq.com/qq.com/gtimg.cn/url.cn/qpic.cn），防 SSRF；
+    *   `parse_qqmusic_ids` 支持 `song_mid`/`songMid`/`mid`、`mediaMid`/`mediaid` 参数变体与
+        `/song`、`/playsong.html` 路径形态。
+
+---
 ## [v1.6.0] - 对齐 JS 版 MV/新歌/新端点 + 修复 v1.5.0 加载崩溃
 
 *   **🎬 MV 专区**: 新增 `#qqmMV 搜索/播放/下载/分类`（/search t=12、/mv/category、/mv/tag、/mv/url），

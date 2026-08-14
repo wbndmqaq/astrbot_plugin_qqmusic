@@ -8,7 +8,9 @@ import re
 import time
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import urljoin, urlparse
 
+import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Plain
@@ -36,6 +38,57 @@ def _safe_int(v, default: int = 0) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+# QQ 音乐相关域名白名单（短链重定向仅允许这些 host，防 SSRF）—— 对齐 JS 版 resolve.js
+_QQ_HOST_SUFFIXES = ("y.qq.com", "qq.com", "gtimg.cn", "url.cn", "qpic.cn")
+
+
+def _is_qq_host(hostname: str = "") -> bool:
+    host = str(hostname or "").strip().lower()
+    if not host:
+        return False
+    return any(host == s or host.endswith("." + s) for s in _QQ_HOST_SUFFIXES)
+
+
+async def _follow_qq_redirect(url: str, max_redirects: int = 5) -> str:
+    """跟随 c6.y.qq.com 短链重定向（SSRF 白名单内），拿最终 songDetail 链接；失败回退原链接。
+
+    最后一跳同样校验 host，避免把非白名单 URL 交回上层解析（SSRF 加固）。
+    """
+    current = url
+    hops = 0
+    while True:
+        try:
+            parsed = urlparse(current)
+            if not _is_qq_host(parsed.hostname):
+                return url
+        except Exception:
+            return url
+        try:
+            async with aiohttp.ClientSession(
+                headers={"User-Agent": qqapi.UA},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as sess, sess.get(current, allow_redirects=False) as res:
+                if res.status in (301, 302, 303, 307, 308):
+                    location = res.headers.get("Location")
+                    if not location:
+                        return current
+                    next_url = urljoin(current, location)
+                    if hops >= max_redirects:
+                        # 最后一跳也校验 host，避免把非白名单 URL 交回上层解析
+                        try:
+                            if not _is_qq_host(urlparse(next_url).hostname):
+                                return url
+                        except Exception:
+                            return url
+                        return next_url
+                    current = next_url
+                    hops += 1
+                    continue
+                return current
+        except Exception:
+            return url
 
 
 def _is_plugin_command_msg(msg: str) -> bool:
@@ -195,6 +248,7 @@ class QQMusicPlugin(Star):
                 "qualityLabel": play.get("qualityLabel")
                 or self._quality_label(play.get("quality")),
                 "mvVid": play.get("mvVid") or "",
+                "degradeNote": play.get("degradeNote") or "",
                 "raw": play,
             }
         except Exception as e:
@@ -515,11 +569,16 @@ class QQMusicPlugin(Star):
             source=source,
             has_url=bool(play.get("url")),
         )
-        card_data["tip"] = (
-            f"正在下载并发送语音（{q_label or '默认音质'}）..."
-            if play.get("url")
-            else f"获取播放链接失败{('：' + play['error']) if play.get('error') else ''}\n请 #qqm登录"
-        ) + (f" · 🎬 该曲有 MV：#qqmMV 播放/下载 直接操作" if mv_vid else "")
+        if play.get("url"):
+            tip = f"正在下载并发送语音（{q_label or '默认音质'}）..."
+        else:
+            err_txt = play["error"] if play.get("error") else ""
+            tip = f"获取播放链接失败{('：' + err_txt) if err_txt else ''}\n请 #qqm登录"
+        if play.get("degradeNote"):
+            tip += f" · {play['degradeNote']}"
+        if mv_vid:
+            tip += " · 🎬 该曲有 MV：#qqmMV 播放/下载 直接操作"
+        card_data["tip"] = tip
         url = await self._render_card(event, card_data, "qqmusic-detail")
         if url:
             await self._send_chain(event, Image.fromFileSystem(url))
@@ -1674,14 +1733,29 @@ class QQMusicPlugin(Star):
                 song = await self._card_to_song(card, user_key)
 
         if not song and cfg.get("resolveLinks", True):
+            # 排除中文标点，避免把链接后的「，很好听」之类吞入（对齐 JS 版 rconsole 同款）
             url_match = re.search(
-                r"https?://(?:[a-z0-9-]+\.)?(?:y\.qq\.com|c6\.y\.qq\.com)[^\s一-龥]*",
+                r"https?://(?:[a-z0-9-]+\.)?(?:y\.qq\.com|c6\.y\.qq\.com)"
+                r'[^\s，。；：！？、（）【】《》»"“”\'`一-龥]*',
                 text,
                 re.IGNORECASE,
             )
             if url_match:
                 url = url_match.group(0)
                 self._log_info(f"识别链接: {url}")
+
+                # c6.y.qq.com 短链（移动端分享形态）跟随重定向，拿最终 songDetail 链接
+                if re.search(
+                    r"c6\.y\.qq\.com/base/fcgi-bin/u\?", url, re.IGNORECASE
+                ) or re.search(r"[?&]__=", url):
+                    try:
+                        final_url = await _follow_qq_redirect(url)
+                        if final_url and final_url != url:
+                            url = final_url
+                            self._log_info(f"短链跟随: {url}")
+                    except Exception as err:
+                        self._log_warn(f"短链跟随失败: {err}")
+
                 ext_ids = qqapi.parse_qqmusic_extended_ids(url)
                 scope = self._scope(event)
 
@@ -1811,6 +1885,7 @@ class QQMusicPlugin(Star):
                     "quality": play.get("quality"),
                     "qualityLabel": play.get("qualityLabel")
                     or self._quality_label(play.get("quality", "")),
+                    "degradeNote": play.get("degradeNote") or "",
                     "raw": play,
                 }
             except Exception as err:
@@ -1846,11 +1921,14 @@ class QQMusicPlugin(Star):
             source=("卡片" if from_card else "链接"),
             has_url=bool(play.get("url")),
         )
-        card_data["tip"] = (
+        tip = (
             f"正在下载并发送语音（{q_label or '默认音质'}）..."
             if play.get("url")
             else (fail_hint or "未获取到播放链接")
         )
+        if play.get("degradeNote"):
+            tip += f" · {play['degradeNote']}"
+        card_data["tip"] = tip
         url = await self._render_card(event, card_data, "qqmusic-detail")
         if url:
             await self._send_chain(event, Image.fromFileSystem(url))
@@ -2470,7 +2548,8 @@ class QQMusicPlugin(Star):
                     img_sent += 1
                     loop = asyncio.get_event_loop()
                     loop.call_later(120, lambda p=qr_path: self._safe_unlink(p))
-                except Exception:
+                except Exception as err:
+                    self._log_warn(f"二维码图片发送失败: {err}")
                     continue  # 单张失败继续
             if len(codes) == 1:
                 tips = f"请用{codes[0][0]}扫一扫，确认后自动登录"
@@ -3098,7 +3177,7 @@ class QQMusicPlugin(Star):
                 {"k": "列表数", "v": str(int(c.get("maxList") or 10))},
                 {
                     "k": "发送",
-                    "v": f"语音 {on_off(c.get('sendVocal'))} / 文件 {on_off(c.get('uploadFile'))} / 原生卡 {on_off(c.get('sendNativeCard'))} / 自定义卡 {on_off(c.get('sendCustomCard'))}",
+                    "v": f"语音 {on_off(c.get('sendVocal'))} / 文件 {on_off(c.get('uploadFile'))} / 原生卡 {on_off(c.get('sendNativeCard'))} / 自定义卡 {on_off(c.get('sendCustomCard'))}{' / 禁高清语音' if c.get('disableHighQualityVocal') else ''}",
                 },
             ],
             "commands": [

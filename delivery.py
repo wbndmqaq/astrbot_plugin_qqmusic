@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -40,6 +43,131 @@ def _no_vocal(event) -> bool:
         return any(k in name for k in _NO_VOCAL_PLATFORMS)
     except Exception:
         return False
+
+
+# OneBot 系平台（aiocqhttp → QQ 个人号，底层 NapCat/LLOneBot/Lagrange 等 NTQQ 协议端）。
+# 与 Yunzai 版 OneBot 行为对齐：语音先压成紧凑 mp3、群文件优先传压缩版（NTQQ 拒 .flac）
+_ONEBOT_PLATFORMS = ("aiocqhttp",)
+
+
+def _is_onebot(event) -> bool:
+    try:
+        name = str(event.get_platform_name() or "")
+        return any(k in name for k in _ONEBOT_PLATFORMS)
+    except Exception:
+        return False
+
+
+# ──────────── QQ 官方分片文件上传（AstrBot ≥4.27.3）────────────
+
+# 对齐 AstrBot 4.27.3 `qqofficial_chunked_upload.py` 的分片阈值：
+# qq_official 适配器对 >10MB 的本地 File 组件自动走 QQ 多媒体分片上传
+_QQ_CHUNKED_UPLOAD_THRESHOLD = 10 * 1024 * 1024  # 10MB
+
+
+def _qq_chunked_available(cfg: dict) -> bool:
+    """qq_official 大文件分片上传是否可用。
+
+    - 配置 `qqofficialChunkedUpload` 关闭时不可用
+    - AstrBot ≥4.27.3（`astrbot.__version__`）起适配器支持；旧版无此能力
+    """
+    if cfg.get("qqofficialChunkedUpload", True) is False:
+        return False
+    try:
+        from astrbot import __version__ as _ver
+
+        parts = [int(x) for x in str(_ver).lstrip("v").split(".")]
+        return parts[:3] >= [4, 27, 3]
+    except Exception:
+        # 版本不可读时保守视为不支持，交给调用方走压缩版兜底
+        return False
+
+
+# ──────────── 语音压缩（ffmpeg）────────────
+
+# 语音直传白名单：体积不大时直接发，避免无谓转码（对齐 JS 版 send.js）
+_VOCAL_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+_VOCAL_DIRECT_EXT = {"mp3", "silk", "wav", "amr", "m4a", "ogg", "flac"}
+# QQ 官方机器人：适配器内部转码为 silk，直传白名单收窄（silk/wav/mp3/flac）
+_QQOFFICIAL_DIRECT_EXT = {"silk", "wav", "mp3", "flac"}
+
+_ffmpeg_checked = False
+_ffmpeg_ok = False
+
+
+def _ffmpeg_available() -> bool:
+    global _ffmpeg_checked, _ffmpeg_ok
+    if not _ffmpeg_checked:
+        _ffmpeg_checked = True
+        _ffmpeg_ok = shutil.which("ffmpeg") is not None
+    return _ffmpeg_ok
+
+
+async def prepare_vocal_file(
+    file_path: str,
+    *,
+    direct_ext: set[str] | None = None,
+    max_bytes: int = _VOCAL_MAX_BYTES,
+    low_quality: bool = False,
+) -> str:
+    """把高音质音频压成紧凑 mp3（语音发送用），返回可发送路径。
+
+    - FLAC 等高音质文件直接作语音(Record)会被协议端以体积/格式拒绝，先 ffmpeg 压成 mp3
+    - low_quality（禁用高清语音）：PC QQ 播放不了 44.1k 立体声语音时开启，强制重编码成
+      mono 16k/32k（QQ 语音标准规格），输出 _vocal_low.mp3 防与高音质版本串台
+    - 低音质仅用于语音；群文件兜底仍保高音质（调用方决定）
+    - ffmpeg 缺失 / 压缩失败时回退原文件，保证功能可用
+    """
+    if not file_path or not os.path.exists(file_path):
+        return file_path
+    abs_path = os.path.abspath(file_path)
+    try:
+        size = os.path.getsize(abs_path)
+    except OSError:
+        return file_path
+    ext = os.path.splitext(abs_path)[1].lstrip(".").lower()
+    direct = direct_ext if direct_ext is not None else _VOCAL_DIRECT_EXT
+    # 低音质模式强制重编码（即使源是小 mp3，也要转成 PC 兼容格式）
+    if not low_quality and ext in direct and size <= max_bytes:
+        return abs_path
+    if not _ffmpeg_available():
+        return file_path
+
+    stem = os.path.splitext(os.path.basename(abs_path))[0]
+    out = os.path.join(
+        os.path.dirname(abs_path),
+        f"{stem}_vocal_low.mp3" if low_quality else f"{stem}_vocal.mp3",
+    )
+    if os.path.exists(out):
+        try:
+            if os.path.getsize(out) > 256:
+                return out
+        except OSError:
+            pass
+
+    bitrate = "64k" if size > 16 * 1024 * 1024 else "96k" if size > 8 * 1024 * 1024 else "128k"
+    common = ["ffmpeg", "-y", "-i", abs_path, "-vn", "-acodec", "libmp3lame"]
+    args = (
+        common + ["-ar", "16000", "-ac", "1", "-b:a", "32k", out]
+        if low_quality
+        else common + ["-ar", "44100", "-ac", "2", "-b:a", bitrate, out]
+    )
+    try:
+        # 编码是 CPU 密集操作，放线程池避免阻塞事件循环
+        res = await asyncio.to_thread(
+            subprocess.run,
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+        )
+        if res.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) <= 256:
+            with contextlib.suppress(OSError):
+                os.remove(out)
+            return file_path
+        return out
+    except Exception:
+        return file_path
 
 
 def get_temp_dir(cfg: dict, plugin_dir: str) -> str:
@@ -178,7 +306,14 @@ async def send_native_music_card(event, platform_type: str, music_id: str) -> bo
 
 
 async def send_custom_music_card(
-    event, *, url: str, audio: str, title: str, image: str = "", content: str = ""
+    event,
+    *,
+    url: str,
+    audio: str,
+    title: str,
+    image: str = "",
+    content: str = "",
+    singer: str = "",
 ) -> bool:
     try:
         bot = event.platform
@@ -194,6 +329,8 @@ async def send_custom_music_card(
         }
         if content:
             data["content"] = content
+        if singer:
+            data["singer"] = singer
         msg = [{"type": "music", "data": data}]
         is_group = bool(getattr(event.message_obj, "group_id", None))
         sid = event.message_obj.group_id if is_group else event.get_sender_id()
@@ -270,9 +407,19 @@ async def deliver_song(
             pending_text = ""
 
     if allow_native and song.get("songid"):
-        await send_native_music_card(event, "qq", song["songid"])
-
-    if allow_custom and play.get("url"):
+        native_ok = await send_native_music_card(event, "qq", song["songid"])
+        # NTQQ 系协议端不支持 type:qq 原生卡，失败时若有直链降级为自定义卡（对齐 JS 版 send.js）
+        if not native_ok and allow_custom and play.get("url"):
+            await send_custom_music_card(
+                event,
+                url=page_url,
+                audio=play["url"],
+                title=title,
+                image=cover,
+                content=singer,
+                singer=singer,
+            )
+    elif allow_custom and play.get("url"):
         await send_custom_music_card(
             event,
             url=page_url,
@@ -280,6 +427,7 @@ async def deliver_song(
             title=title,
             image=cover,
             content=singer,
+            singer=singer,
         )
 
     if not play.get("url"):
@@ -355,24 +503,87 @@ async def deliver_song(
         )
         await plugin._send_chain(event, *comps)
 
+    # 语音 / OneBot 群文件都需要「紧凑 mp3」：FLAC 直接作语音会被协议端拒；
+    # OneBot(NTQQ) 群文件对 .flac 也常报「未知文件类型或路径不存在」。其余平台群文件保留原始高音质文件。
+    # 低音质只用于语音（禁用高清语音时 PC 可播）；仅作群文件兜底时仍保高音质。
+    # 无语音平台（weixin_oc 等）语音被跳过时不压缩，避免浪费编码
+    is_onebot = _is_onebot(event)
+    no_vocal = _no_vocal(event)
+    need_compress = bool(local_path) and (
+        (want_vocal and not no_vocal) or (want_file and is_onebot)
+    )
+    vocal_path = ""
+    if need_compress:
+        vocal_path = await prepare_vocal_file(
+            local_path,
+            direct_ext=(
+                _QQOFFICIAL_DIRECT_EXT
+                if _is_passive_limited(event)
+                else _VOCAL_DIRECT_EXT
+            ),
+            low_quality=want_vocal and cfg.get("disableHighQualityVocal") is True,
+        )
+    has_compressed = bool(vocal_path and vocal_path != local_path)
+    # 压缩产物同样纳入清理，避免 temp 目录累积
+    if has_compressed:
+        _schedule_cleanup(vocal_path, keep_sec)
+
     # 语音/文件分别尝试发送，互不阻塞（语音失败不影响文件）
     # 受限平台（QQ 官方）下语音由适配器转码，文案并入首条媒体省被动回复额度
     limited_tag = "（受限平台）" if is_limited else ""
-    no_vocal = _no_vocal(event)
     if want_vocal and no_vocal:
         plugin._log_info("当前平台不支持语音，跳过语音只发文件")
     elif want_vocal:
         try:
-            await _send_media(Record.fromFileSystem(local_path))
+            await _send_media(Record.fromFileSystem(vocal_path or local_path))
             pending_text = ""
         except Exception as e:
             plugin._log_warn(f"语音发送失败{limited_tag}: {e}")
     if want_file:
-        try:
-            await _send_media(File(file_display, file=local_path))
-            pending_text = ""
-        except Exception as e:
-            plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
+        # OneBot：有压缩版优先传压缩 mp3（可靠）；其余平台 / 无压缩版保留原始文件
+        # QQ 官方：大文件默认发原始文件走适配器分片上传（AstrBot ≥4.27.3，>10MB 自动分片）；
+        # 分片不可用/关闭且是大文件时改传压缩 mp3 兜底（旧版大 FLAC 直发必败）
+        is_qqofficial = _is_passive_limited(event)
+        qq_large_file = False
+        if is_qqofficial:
+            try:
+                qq_large_file = os.path.getsize(local_path) > _QQ_CHUNKED_UPLOAD_THRESHOLD
+            except OSError:
+                qq_large_file = False
+        qq_chunk = is_qqofficial and _qq_chunked_available(cfg) and qq_large_file
+        if is_onebot and has_compressed:
+            comp_display = (
+                file_display.rsplit(".", 1)[0] + "_压缩版.mp3"
+                if "." in file_display
+                else "QQ音乐_压缩版.mp3"
+            )
+            try:
+                await _send_media(File(comp_display, file=vocal_path))
+                pending_text = ""
+            except Exception as e:
+                plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
+        elif is_qqofficial and has_compressed and qq_large_file and not qq_chunk:
+            # QQ 官方大文件但分片不可用/关闭 → 压缩 mp3 兜底
+            comp_display = (
+                file_display.rsplit(".", 1)[0] + "_压缩版.mp3"
+                if "." in file_display
+                else "QQ音乐_压缩版.mp3"
+            )
+            try:
+                await _send_media(File(comp_display, file=vocal_path))
+                pending_text = ""
+            except Exception as e:
+                plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
+        else:
+            if qq_chunk:
+                plugin._log_info(
+                    f"QQ官方大文件 {os.path.basename(local_path)} 走适配器分片上传"
+                )
+            try:
+                await _send_media(File(file_display, file=local_path))
+                pending_text = ""
+            except Exception as e:
+                plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
     # 临时文件清理：语音已发 / 平台无语音只发文件 / 仅文件时都需调度
     # （避免 weixin_oc 等 no_vocal 平台在 want_vocal 下语音被跳过、文件又不清理导致泄漏）
     if (want_vocal and not no_vocal) or want_file:
