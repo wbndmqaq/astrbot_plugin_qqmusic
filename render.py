@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 # Chromium 启动参数（对齐原 JS 插件 puppeteer 启动参数）
 _CHROME_ARGS = [
@@ -58,10 +59,8 @@ async def render_html_to_png(html: str, out_path: str) -> bool:
                 document.body.style.margin = '0';
             }"""
         )
-        try:
+        with contextlib.suppress(Exception):
             await page.evaluate("document.fonts.ready.then(() => {})")
-        except Exception:
-            pass
         await page.wait_for_timeout(200)
 
         # 截 .page（含浅绿底 + 卡片），整图不透明
@@ -98,14 +97,10 @@ async def close():
 
     global _playwright, _browser
     if _browser is not None:
-        try:
+        with contextlib.suppress(Exception):
             await _browser.close()
-        except Exception:
-            pass
         _browser = None
     if _playwright is not None:
-        try:
+        with contextlib.suppress(Exception):
             await _playwright.stop()
-        except Exception:
-            pass
         _playwright = None

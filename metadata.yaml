@@ -7,7 +7,7 @@ desc: |
   推荐、电台、日推、收藏、歌手/专辑/歌单/评论、QQ 音乐分享卡片与链接自动解析、
   webqr 扫码登录、音质自适配降级、语音/群文件/视频发送、QQ官方大文件分片上传（AstrBot ≥4.27.3）。
   需配合后端API使用（API 由用户自行解决）。
-version: v1.7.0
+version: v1.7.1
 author: wbndm
 repo: https://github.com/wbndmqaq/astrbot_plugin_qqmusic
 astrbot_version: ">=4.16,<5"

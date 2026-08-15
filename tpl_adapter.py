@@ -89,7 +89,8 @@ def _jsval_to_jinja(v: str, *, is_cond: bool = False) -> str:
     parts = _split_top(v, "+")
     if len(parts) > 1:
         return "(" + " ~ ".join(_jsval_to_jinja(p.strip()) for p in parts) + ")"
-    # 属性访问 data.x / item.y —— Jinja 用点；但与 dict 内置方法（items/keys/values/get 等）冲突时改用 [] 访问
+    # 属性访问 data.x / item.y —— Jinja 用点；但与 dict 内置方法
+    # （items/keys/values/get 等）冲突时改用 [] 访问
     v = v.replace("&&", " and ").replace("||", " or ") if is_cond else v
     # 处理 obj.prop 形式：若 prop 是 dict 内置方法名，转 obj['prop']
     DICT_METHODS = {
@@ -159,7 +160,8 @@ def convert_template(src: str) -> str:
     # {{else}}               -> {% else %}
     # {{/if}}                -> {% endif %}
     # {{each arr item}}      -> {% for item in arr %}
-    # {{each arr item idx}}  -> {% set item, idx = (arr | enumerate_items)[loop.index0] %}  —— 简化：仅支持 2 参
+    # {{each arr item idx}}  -> {% set item, idx = (arr | enumerate_items)[loop.index0] %}
+    #                          —— 简化：仅支持 2 参
     # {{/each}}              -> {% endfor %}
 
     # each: {{each arr item [idx]}} -> {% for item in arr %}

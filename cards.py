@@ -43,7 +43,7 @@ class SessionStore:
         return None
 
     @classmethod
-    async def set(cls, plugin, scope: str, session: dict, ttl_sec: int = TTL) -> dict:
+    async def set(cls, plugin, scope: str, session: dict) -> dict:
         data = {"group_id": scope, "updatedAt": time.time(), **session}
         cls._mem[str(scope)] = data
         k = cls._key(scope)
@@ -88,7 +88,14 @@ def api_hint_for(cfg: dict) -> str:
 
 def format_song_list(lst: list, title: str) -> str:
     if not isinstance(lst, list) or not lst:
-        return f"♫ {title}\n\n📭 暂无数据\n可能原因：\n1. API 未启动或网络异常\n2. 账号未登录（需要 #qqm登录）\n3. 请求超时，请稍后重试"
+        return (
+            f"♫ {title}\n\n"
+            "📭 暂无数据\n"
+            "可能原因：\n"
+            "1. API 未启动或网络异常\n"
+            "2. 账号未登录（需要 #qqm登录）\n"
+            "3. 请求超时，请稍后重试"
+        )
     lines = [f"♫ {title}"]
     for i, s in enumerate(lst):
         idx = i + 1
@@ -129,7 +136,7 @@ def format_mv_list_text(lst: list) -> str:
         name = m.get("mvtitle") or m.get("name") or m.get("songName") or "未知"
         singer = m.get("singerName") or "未知"
         lines.append(f"{i + 1}. {name} - {singer}")
-    return f"♫ MV 搜索结果（发 #qqmMV 播放 / 下载 序号）\n" + "\n".join(lines)
+    return "♫ MV 搜索结果（发 #qqmMV 播放 / 下载 序号）\n" + "\n".join(lines)
 
 
 def _fmt_count(n) -> str:
@@ -201,7 +208,8 @@ def format_detail_text(
 ) -> str:
     is_vip = bool(song.get("payplay"))
     lines = [
-        f"♪ {song.get('songName') or '未知'} - {song.get('singerName') or '未知'}{' [会员/付费]' if is_vip else ''}"
+        f"♪ {song.get('songName') or '未知'} - {song.get('singerName') or '未知'}"
+        + (" [会员/付费]" if is_vip else "")
     ]
     if song.get("albumName"):
         lines.append(f"专辑：{song['albumName']}")
@@ -340,7 +348,9 @@ def build_lyric_card_data(
     cfg: dict | None = None,
 ) -> dict:
     cfg = cfg or {}
-    body = [str(l or "").strip() for l in (lines or []) if str(l or "").strip()][:36]
+    body = [
+        str(ln or "").strip() for ln in (lines or []) if str(ln or "").strip()
+    ][:36]
     return {
         "songName": song_name,
         "singerName": singer_name,
@@ -522,7 +532,10 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
         "statQuality": quality,
         "statMode": stat_mode,
         "apiHint": api_hint_for(cfg),
-        "tip": "付费曲需主人扫码登录；指令统一 #qqm 前缀；#听序号 仅在本群点歌会话有效；分享 QQ 音乐卡片/链接可自动解析。",
+        "tip": (
+            "付费曲需主人扫码登录；指令统一 #qqm 前缀；"
+            "#听序号 仅在本群点歌会话有效；分享 QQ 音乐卡片/链接可自动解析。"
+        ),
         "sections": [
             {
                 "title": "点歌播放",

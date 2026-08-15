@@ -81,7 +81,8 @@ git clone https://github.com/wbndmqaq/astrbot_plugin_qqmusic
 
 ## 📮 用户群
 
-QQ 群：[点击加入](https://qm.qq.com/q/GKxEVvF8Ua)
+API申请QQ群：[点击加入](https://qm.qq.com/q/GKxEVvF8Ua)
+bug反馈QQ群：[点击加入](https://qm.qq.com/q/8sOZdZTnaw)
 
 - API 地址和 Token 申请
 - 使用问题反馈

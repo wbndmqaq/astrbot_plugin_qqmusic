@@ -1,6 +1,25 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v1.7.1] - 指令描述全覆盖 + 测试基建 + 石山清理 + 全仓 ruff 零告警
+
+*   **📋 指令描述全覆盖**: 34/36 个 handler 缺失 docstring（WebUI 指令列表显示「无描述」）全部补齐，
+    现有 2 个 + 新增 34 个，覆盖点歌/发现/MV/解析/登录/管理全部分区。
+*   **🧪 测试基建**: 新增 `test_commands.py`（本地桩 aiohttp/astrbot，`python test_commands.py` 直接运行），
+    169 项覆盖命令路由正则、链接/卡片解析、音质降级提示、平台检测（含分片上传能力判定）、配置 schema、
+    文件名清洗、`_play_view` 归一化、handler docstring 全覆盖。
+*   **🐛 修复**: `#qqm 测试` 连通测试指令无法触发——正则 `^#?(qqm测试|qq音乐测试)$` 缺 `\s*`，
+    与 README/帮助文档写的 `#qqm 测试`（带空格）不一致；改为兼容 `#qqm测试` / `#qqm 测试` / `#qqm ping`。
+*   **🧹 死代码清理**: `SessionStore.set` 的 `ttl_sec` 参数从未使用（`get` 走 `cls.TTL`）、
+    `_handle_response` 的 `base`/`url` 死参数、无占位符 f-string、mv handler 3 处局部 import 提升到顶层。
+*   **🗻 石山重构**: 新增 `_play_view()` 归一化两处重复的 play 视图 dict（顺带补上解析流程缺失的 `mvVid`）；
+    `deliver_song` 压缩文件名 `comp_display` 重复计算合并为 `use_compressed` 单一分支。
+*   **✨ 全仓 ruff 零告警**: 清理 29 处 E501（ruff 按显示宽度计，CJK 双宽——中文长字符串/注释折行、
+    嵌套三元平铺、UA 长串拼接）；顺带 17 处非 E501（SIM105→`contextlib.suppress`、E741→`l` 改 `ln`、
+    E731→lambda 改 def、S311/S701→noqa 注释、B904→`raise from`、SIM108→三元）。
+    `ruff check .` 全绿；`test_commands.py` 用 `[lint.per-file-ignores]` 豁免测试断言长行。
+
+---
 ## [v1.7.0] - 对齐 JS 版语音压缩/禁用高清语音/音质降级提示/链接解析加固
 
 *   **🔇 禁用高清语音开关**: 新增配置 `disableHighQualityVocal`（默认关）。PC QQ 播放不了 44.1k 立体声语音时开启，

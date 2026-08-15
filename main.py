@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import random
@@ -13,12 +14,18 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import File, Image, Plain
 from astrbot.api.star import Context, Star
 
 from . import api as qqapi
 from . import cards as cardlib
-from .delivery import deliver_song, send_native_music_card
+from .delivery import (
+    _is_passive_limited,
+    _schedule_cleanup,
+    deliver_song,
+    deliver_video,
+    send_native_music_card,
+)
 from .quality import QUALITY_LABEL
 
 PLUGIN_DIR = str(Path(__file__).resolve().parent)
@@ -141,10 +148,8 @@ def _collect_message_text(event: AstrMessageEvent) -> str:
                 continue
             else:
                 # 其它组件（含可能的 JSON/分享）序列化
-                try:
+                with contextlib.suppress(Exception):
                     parts.append(json.dumps(seg, ensure_ascii=False, default=str))
-                except Exception:
-                    pass
     except Exception:
         pass
     # 原始消息
@@ -231,6 +236,19 @@ class QQMusicPlugin(Star):
     def _quality_label(self, q: str) -> str:
         return QUALITY_LABEL.get(q, q or "")
 
+    @staticmethod
+    def _play_view(play: dict) -> dict:
+        """把 song_url_best 结果归一化为投递视图（详情卡/语音投递共用）。"""
+        q = play.get("quality") or ""
+        return {
+            "url": play.get("url", ""),
+            "quality": play.get("quality"),
+            "qualityLabel": play.get("qualityLabel") or QUALITY_LABEL.get(q, q or ""),
+            "mvVid": play.get("mvVid") or "",
+            "degradeNote": play.get("degradeNote") or "",
+            "raw": play,
+        }
+
     async def _resolve_play(self, song: dict, cfg: dict, user_key: str = "") -> dict:
         quality = cfg.get("quality") or "flac"
         fallback = cfg.get("qualityFallback", True) is not False
@@ -242,15 +260,7 @@ class QQMusicPlugin(Star):
                 fallback=fallback,
                 user_key=user_key,
             )
-            return {
-                "url": play.get("url", ""),
-                "quality": play.get("quality"),
-                "qualityLabel": play.get("qualityLabel")
-                or self._quality_label(play.get("quality")),
-                "mvVid": play.get("mvVid") or "",
-                "degradeNote": play.get("degradeNote") or "",
-                "raw": play,
-            }
+            return self._play_view(play)
         except Exception as e:
             return {
                 "url": "",
@@ -277,7 +287,8 @@ class QQMusicPlugin(Star):
             if not os.path.exists(tmpl_path):
                 return None
             tmpl = get_jinja_template(tmpl_path)
-            html = Environment().from_string(tmpl).render(data=data)
+            # noqa: S701 模板为插件自有文件，且部分值需保留 HTML（如搜索命中高亮），不开启 autoescape
+            html = Environment().from_string(tmpl).render(data=data)  # noqa: S701
             # 本地 playwright 直渲：元素截图自带背景与裁剪，无需远程 t2i 服务
             d = get_temp_dir(self._cfg(), PLUGIN_DIR)
             file_path = os.path.join(
@@ -285,7 +296,8 @@ class QQMusicPlugin(Star):
             )
             if not await render_html_to_png(html, file_path):
                 self._log_warn(
-                    f"{tpl_name} 渲染失败（playwright 不可用？请确认已安装并执行 playwright install chromium）"
+                    f"{tpl_name} 渲染失败"
+                    "（playwright 不可用？请确认已安装并执行 playwright install chromium）"
                 )
                 return None
             # 卡片 PNG 发送后延迟清理，防止 temp 目录无限增长
@@ -325,6 +337,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*点歌\s*(.+)$")
     async def pick_song(self, event: AstrMessageEvent):
+        """#qqm点歌 关键词 搜索并展示歌曲列表（带MV徽标）"""
 
 
         cfg = self._cfg()
@@ -384,6 +397,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*(推荐)?听\s*([1-9][0-9]?)$|^#听\s*([1-9][0-9]?)$")
     async def choose_song(self, event: AstrMessageEvent):
+        """#qqm听N / #qqm推荐听N 播放当前会话列表第 N 首"""
 
 
         cfg = self._cfg()
@@ -508,6 +522,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*播放\s*(.+)$")
     async def play_direct(self, event: AstrMessageEvent):
+        """#qqm播放 关键词 直接播放第一条"""
 
 
         cfg = self._cfg()
@@ -594,6 +609,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*歌词\s*(.+)$")
     async def get_lyric(self, event: AstrMessageEvent):
+        """#qqm歌词 关键词 查询歌词"""
 
 
         cfg = self._cfg()
@@ -630,11 +646,11 @@ class QQMusicPlugin(Star):
             data = await qqapi.lyric(songmid, self._user_key(event))
             text = (data or {}).get("lyric") or ""
             lines = [
-                re.sub(r"^\[[^\]]*]", "", l).strip()
-                for l in text.split("\n")
-                if l.strip()
+                re.sub(r"^\[[^\]]*]", "", ln).strip()
+                for ln in text.split("\n")
+                if ln.strip()
             ]
-            lines = [l for l in lines if l][:40]
+            lines = [ln for ln in lines if ln][:40]
             if not lines:
                 await self._reply(event, "暂无歌词")
                 event.stop_event()
@@ -654,6 +670,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*热搜$")
     async def hot_search(self, event: AstrMessageEvent):
+        """#qqm热搜 查看热搜榜"""
 
 
         try:
@@ -678,6 +695,7 @@ class QQMusicPlugin(Star):
         r"^#?(qq|QQ)m\s*help$|^#?(qq|QQ)m\s*帮助$|^#?(qq|QQ)音乐帮助$|^#qm帮助$"
     )
     async def help(self, event: AstrMessageEvent):
+        """#qqm帮助 帮助图片卡片"""
 
 
         cfg = self._cfg()
@@ -721,6 +739,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*排行\s*(.*)$")
     async def chart(self, event: AstrMessageEvent):
+        """#qqm排行 榜单名 查看排行榜（飙升/热歌/新歌等）"""
 
 
         cfg = self._cfg()
@@ -991,7 +1010,8 @@ class QQMusicPlugin(Star):
                 else:
                     await self._reply(
                         event,
-                        "用法：#qqmMV 播放/下载 序号 或 vid；点歌后再发 #qqmMV 播放/下载 可直接操作该曲 MV",
+                        "用法：#qqmMV 播放/下载 序号 或 vid；"
+                        "点歌后再发 #qqmMV 播放/下载 可直接操作该曲 MV",
                     )
                     event.stop_event()
                     return
@@ -1044,8 +1064,6 @@ class QQMusicPlugin(Star):
 
             # MV 详情卡（复用 qqmusic-detail 模板）
             # 受限平台（qq_official 被动回复受限）把卡片并入视频同一条消息，省被动回复额度
-            from .delivery import _is_passive_limited, deliver_video
-
             passive_limited = _is_passive_limited(event)
             img_path = ""
             try:
@@ -1073,15 +1091,11 @@ class QQMusicPlugin(Star):
                 fp = ret.get("filePath") or ""
                 sent_file = False
                 if fp and os.path.exists(fp):
-                    from .delivery import _schedule_cleanup
-
                     title_f = mv_obj.get("mvtitle") or mv_obj.get("name") or "MV"
                     try:
-                        from astrbot.api.message_components import File as _File
-
                         await self._send_chain(
                             event,
-                            _File(
+                            File(
                                 re.sub(r'[\\/:*?"<>|]', "", str(title_f))[:30] + ".mp4",
                                 file=fp,
                             ),
@@ -1165,6 +1179,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*推荐$")
     async def recommend(self, event: AstrMessageEvent):
+        """#qqm推荐 热门推荐歌单"""
 
 
         cfg = self._cfg()
@@ -1181,9 +1196,9 @@ class QQMusicPlugin(Star):
                 return
             lines = ["♫ 热门推荐歌单"]
             for i, p in enumerate(lst[:15]):
-                lines.append(
-                    f"{i + 1}. {p.get('title') or p.get('dissname') or '未知'} ({p.get('listenNum') or p.get('listennum') or 0}次播放)"
-                )
+                name = p.get("title") or p.get("dissname") or "未知"
+                cnt = p.get("listenNum") or p.get("listennum") or 0
+                lines.append(f"{i + 1}. {name} ({cnt}次播放)")
             lines.append("\n发送 #qqm推荐听序号 查看歌单歌曲")
             await cardlib.SessionStore.set(
                 self,
@@ -1215,6 +1230,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*(来首歌|随机|放一首|来一首)$")
     async def random_song(self, event: AstrMessageEvent):
+        """#qqm来首歌 随机推荐一首并播放"""
 
 
         cfg = self._cfg()
@@ -1228,7 +1244,7 @@ class QQMusicPlugin(Star):
                 await self._reply(event, "获取推荐失败，请重试")
                 event.stop_event()
                 return
-            song = random.choice(songs)
+            song = random.choice(songs)  # noqa: S311 非安全场景（随机推荐一首歌）
             await self._reply(
                 event, f"♪ {song.get('songName')} - {song.get('singerName')}"
             )
@@ -1253,6 +1269,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*电台$")
     async def radio(self, event: AstrMessageEvent):
+        """#qqm电台 个性电台 5 首"""
 
 
         cfg = self._cfg()
@@ -1283,6 +1300,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*(日推|每日推荐)$")
     async def daily(self, event: AstrMessageEvent):
+        """#qqm日推 每日推荐（需登录）"""
 
 
         cfg = self._cfg()
@@ -1297,7 +1315,10 @@ class QQMusicPlugin(Star):
             if not songs:
                 await self._reply(
                     event,
-                    "📭 每日推荐为空\n可能原因：\n1. 今日已获取过，请明天再试\n2. 账号无听歌记录，无法生成推荐\n请先 #qqm登录 绑定有听歌记录的账号",
+                    "📭 每日推荐为空\n可能原因：\n"
+                    "1. 今日已获取过，请明天再试\n"
+                    "2. 账号无听歌记录，无法生成推荐\n"
+                    "请先 #qqm登录 绑定有听歌记录的账号",
                 )
                 event.stop_event()
                 return
@@ -1336,6 +1357,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*收藏$")
     async def favorites(self, event: AstrMessageEvent):
+        """#qqm收藏 我的收藏（需登录）"""
 
 
         cfg = self._cfg()
@@ -1350,7 +1372,9 @@ class QQMusicPlugin(Star):
             if not songs:
                 await self._reply(
                     event,
-                    "📭 我的收藏为空\n你的 QQ 音乐「我喜欢」歌单还没有收藏任何歌曲\n\n💡 你可以在 QQ 音乐 App 中收藏歌曲后再来查看",
+                    "📭 我的收藏为空\n"
+                    "你的 QQ 音乐「我喜欢」歌单还没有收藏任何歌曲\n\n"
+                    "💡 你可以在 QQ 音乐 App 中收藏歌曲后再来查看",
                 )
                 event.stop_event()
                 return
@@ -1391,6 +1415,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*歌手\s+(.+)$")
     async def artist(self, event: AstrMessageEvent):
+        """#qqm歌手 关键词 搜索歌手，展示热门歌曲"""
 
 
         cfg = self._cfg()
@@ -1475,6 +1500,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*专辑\s+(.+)$")
     async def album(self, event: AstrMessageEvent):
+        """#qqm专辑 关键词 搜索专辑，展示曲目列表"""
 
 
         cfg = self._cfg()
@@ -1540,6 +1566,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*歌单\s+(.+)$")
     async def playlist(self, event: AstrMessageEvent):
+        """#qqm歌单 关键词 搜索歌单，展示歌曲"""
 
 
         cfg = self._cfg()
@@ -1597,6 +1624,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*评论\s+(.+)$")
     async def get_comment(self, event: AstrMessageEvent):
+        """#qqm评论 关键词 查看歌曲热门评论"""
 
 
         cfg = self._cfg()
@@ -1644,7 +1672,8 @@ class QQMusicPlugin(Star):
                 )
                 event.stop_event()
                 return
-            # 对齐原插件：cleanCommentText 清洗（表情代码/[音频]标记/\\r\\n）+ middlecommentcontent 字段
+            # 对齐原插件：cleanCommentText 清洗（表情代码/[音频]标记/\\r\\n）
+            # + middlecommentcontent 字段
             comment_lines = []
             for i, c in enumerate(all_comments[:10]):
                 nick = c.get("nick") or c.get("nickname") or "匿名"
@@ -1698,9 +1727,10 @@ class QQMusicPlugin(Star):
 
     @filter.regex(
         r"(y\.qq\.com|c6\.y\.qq\.com|i\.y\.qq\.com|qqmusic|QQ音乐|100497308|music\.lua|structmsg|songmid|sdkshare_music)",
-        priority=8,  # 高优先级抢先解析，避免与其他插件的同消息 handler 重复处理（对齐原版 accept 抢占）
+        priority=8,  # 高优先级抢先解析，避免与其他插件重复处理（对齐原版 accept 抢占）
     )
     async def resolve(self, event: AstrMessageEvent):
+        """自动解析 QQ 音乐分享卡片 / 链接"""
 
 
         cfg = self._cfg()
@@ -1827,7 +1857,8 @@ class QQMusicPlugin(Star):
                             )
                             await self._reply(
                                 event,
-                                f"识别到歌手链接，热门歌曲{len(result['list'])}首。发送 #qqm听序号 播放",
+                                f"识别到歌手链接，热门歌曲{len(result['list'])}首。"
+                                "发送 #qqm听序号 播放",
                             )
                             return True
                     except Exception as err:
@@ -1880,14 +1911,7 @@ class QQMusicPlugin(Star):
                     fallback=cfg.get("qualityFallback", True) is not False,
                     user_key=user_key,
                 )
-                play = {
-                    "url": play.get("url", ""),
-                    "quality": play.get("quality"),
-                    "qualityLabel": play.get("qualityLabel")
-                    or self._quality_label(play.get("quality", "")),
-                    "degradeNote": play.get("degradeNote") or "",
-                    "raw": play,
-                }
+                play = self._play_view(play)
             except Exception as err:
                 self._log_warn(f"播放链: {err}")
                 play["error"] = str(err)
@@ -2098,10 +2122,8 @@ class QQMusicPlugin(Star):
             old["stopped"] = True
             t = old.get("timer")
             if t is not None:
-                try:
+                with contextlib.suppress(Exception):
                     t.cancel()
-                except Exception:
-                    pass
         self._active_logins[user_id] = task
 
     def _pop_task_if_current(self, user_id: str, task: dict):
@@ -2190,6 +2212,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def start_qr_login(self, event: AstrMessageEvent):
+        """#qqm登录qq QQ音乐 App 扫码登录（MQTT 备用通道，主人）"""
 
 
         cfg = self._cfg()
@@ -2313,10 +2336,8 @@ class QQMusicPlugin(Star):
             # 取消已调度的下一次轮询（对应原插件 finishOk 的 clearTimeout）
             timer = task.get("timer")
             if timer is not None:
-                try:
+                with contextlib.suppress(Exception):
                     timer.cancel()
-                except Exception:
-                    pass
             self._pop_task_if_current(user_id, task)
             await self._on_login_success(event, info)
 
@@ -2395,7 +2416,8 @@ class QQMusicPlugin(Star):
                         self._pop_task_if_current(user_id, task)
                         await self._reply(
                             event,
-                            "二维码已失效（可能被其它 APP 扫描），请重新发送 #qqm登录qq 获取新二维码",
+                            "二维码已失效（可能被其它 APP 扫描），"
+                            "请重新发送 #qqm登录qq 获取新二维码",
                         )
                         return
                 ok_info = await self._pick_login_success(body or {})
@@ -2489,6 +2511,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def start_webqr_login(self, event: AstrMessageEvent):
+        """#qqm登录 无感扫码登录（一张 QQ 码，主人）"""
 
 
         cfg = self._cfg()
@@ -2590,10 +2613,8 @@ class QQMusicPlugin(Star):
             task["stopped"] = True
             timer = task.get("timer")
             if timer is not None:
-                try:
+                with contextlib.suppress(Exception):
                     timer.cancel()
-                except Exception:
-                    pass
             self._pop_task_if_current(user_id, task)
             await self._on_login_success(event, info)
 
@@ -2664,6 +2685,7 @@ class QQMusicPlugin(Star):
         priority=6,
     )
     async def login_status(self, event: AstrMessageEvent):
+        """#qqm状态 / #qms 登录状态卡片"""
 
 
         user_key = self._user_key(event)
@@ -2674,7 +2696,11 @@ class QQMusicPlugin(Star):
                 st = await qqapi.request("/login/status", {}, "get", user_key)
                 d = (st or {}).get("data") or {}
                 if d.get("login"):
-                    api_hint = f"API已登录 uin={d.get('uin')} key={'有' if d.get('hasKey') else '无'} refresh={'有' if d.get('hasRefresh') else '无'}"
+                    key_txt = "有" if d.get("hasKey") else "无"
+                    ref_txt = "有" if d.get("hasRefresh") else "无"
+                    api_hint = (
+                        f"API已登录 uin={d.get('uin')} key={key_txt} refresh={ref_txt}"
+                    )
                     if d.get("keyAgeSec") is not None:
                         api_hint += f" age={d['keyAgeSec']}s"
                 else:
@@ -2828,7 +2854,10 @@ class QQMusicPlugin(Star):
             "uin": self._mask_uin(uin) if logged_in else "-",
             "loginTypeText": self._login_type_text(cookie, status),
             "apiBase": cardlib.mask_api_base(cfg.get("apiBase", "")),
-            "keyStatus": f"API 保管 {self._mask_key(key)}{' · 可刷新' if status.get('hasRefresh') else ''}"
+            "keyStatus": (
+                f"API 保管 {self._mask_key(key)}"
+                + (" · 可刷新" if status.get("hasRefresh") else "")
+            )
             if logged_in
             else "未配置",
             "vipTitle": vip_title,
@@ -2901,6 +2930,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def logout(self, event: AstrMessageEvent):
+        """#qqm登出 清除登录态（主人）"""
 
 
         self._stop_poll(self._user_key(event))
@@ -2918,6 +2948,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def sync_from_api(self, event: AstrMessageEvent):
+        """#qqm同步 从 API 同步登录态（主人）"""
 
 
         user_key = self._user_key(event)
@@ -2949,6 +2980,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def refresh_key(self, event: AstrMessageEvent):
+        """#qqm刷新 续期 key（主人）"""
 
 
         user_key = self._user_key(event)
@@ -2985,6 +3017,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def bind_manual(self, event: AstrMessageEvent):
+        """#qqm绑定 qqmusic://... DeepLink 导入（主人）"""
 
         text = event.message_str.strip()
         m = re.match(r"^#?(?:qq|QQ)m(?:绑定|导入)\s*(.+)$", text, re.IGNORECASE)
@@ -3008,6 +3041,7 @@ class QQMusicPlugin(Star):
     @filter.regex(r"qqmusic://")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def import_deeplink(self, event: AstrMessageEvent):
+        """识别 qqmusic:// DeepLink 并导入登录态（主人）"""
 
 
         text = event.message_str
@@ -3033,6 +3067,7 @@ class QQMusicPlugin(Star):
         re.compile(r"^#?(qqm设置|qqm配置|qq音乐设置)$", re.IGNORECASE), priority=6
     )
     async def show_config(self, event: AstrMessageEvent):
+        """#qqm设置 查看当前配置"""
 
 
         try:
@@ -3074,10 +3109,14 @@ class QQMusicPlugin(Star):
                     login_line,
                     adapter_line,
                     version_line,
-                    f"点歌: {c.get('enableSongRequest', True)}  解析: {c.get('enableResolve', True)}",
-                    f"音质: {c.get('quality', 'auto')}（自动降级: {c.get('qualityFallback', True) is not False}）  列表: {c.get('maxList', 10)}",
+                    f"点歌: {c.get('enableSongRequest', True)}"
+                    f"  解析: {c.get('enableResolve', True)}",
+                    f"音质: {c.get('quality', 'auto')}"
+                    f"（自动降级: {c.get('qualityFallback', True) is not False}）"
+                    f"  列表: {c.get('maxList', 10)}",
                     f"语音: {c.get('sendVocal', True)}  群文件: {c.get('uploadFile', True)}",
-                    f"原生卡: {c.get('sendNativeCard', False)}  自定义卡: {c.get('sendCustomCard', False)}",
+                    f"原生卡: {c.get('sendNativeCard', False)}"
+                    f"  自定义卡: {c.get('sendCustomCard', False)}",
                     "",
                     "主人命令：",
                     "#qqm登录          无感扫码（QQ 码，覆盖 QQ/App，主通道）",
@@ -3125,7 +3164,8 @@ class QQMusicPlugin(Star):
             if c.get("apiBase")
             else "API 未配置"
         )
-        on_off = lambda v: "关" if v is False else "开"
+        def on_off(v) -> str:
+            return "关" if v is False else "开"
 
         return {
             "title": "QQ音乐设置",
@@ -3172,12 +3212,19 @@ class QQMusicPlugin(Star):
                 {"k": "适配器", "v": self._platform_name(event)},
                 {
                     "k": "音质",
-                    "v": f"{quality_label}{' · 自动降级' if c.get('qualityFallback') is not False else ''}",
+                    "v": quality_label
+                    + (" · 自动降级" if c.get("qualityFallback") is not False else ""),
                 },
                 {"k": "列表数", "v": str(int(c.get("maxList") or 10))},
                 {
                     "k": "发送",
-                    "v": f"语音 {on_off(c.get('sendVocal'))} / 文件 {on_off(c.get('uploadFile'))} / 原生卡 {on_off(c.get('sendNativeCard'))} / 自定义卡 {on_off(c.get('sendCustomCard'))}{' / 禁高清语音' if c.get('disableHighQualityVocal') else ''}",
+                    "v": (
+                        f"语音 {on_off(c.get('sendVocal'))}"
+                        f" / 文件 {on_off(c.get('uploadFile'))}"
+                        f" / 原生卡 {on_off(c.get('sendNativeCard'))}"
+                        f" / 自定义卡 {on_off(c.get('sendCustomCard'))}"
+                        + (" / 禁高清语音" if c.get("disableHighQualityVocal") else "")
+                    ),
                 },
             ],
             "commands": [
@@ -3228,6 +3275,7 @@ class QQMusicPlugin(Star):
     @filter.regex(r"^#?(qq|QQ)m\s*api\s*(https?://\S+)$")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def set_api(self, event: AstrMessageEvent):
+        """#qqm api <地址> 设置 API 地址（主人）"""
 
 
         m = re.search(r"api\s*(https?://\S+)", event.message_str, re.IGNORECASE)
@@ -3247,6 +3295,7 @@ class QQMusicPlugin(Star):
     @filter.regex(r"^#?(qq|QQ)m\s*(开启|关闭)(点歌|解析)$")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def toggle(self, event: AstrMessageEvent):
+        """#qqm 开启/关闭 点歌/解析 功能开关（主人）"""
 
 
         m = re.search(r"(开启|关闭)(点歌|解析)", event.message_str)
@@ -3268,6 +3317,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def set_quality(self, event: AstrMessageEvent):
+        """#qqm 音质 <档位> 设置最高音质（主人）"""
 
         m = re.search(
             r"音质\s*(128|m4a|320|flac|ape|hires|atmos|master|atmos_master)",
@@ -3285,20 +3335,26 @@ class QQMusicPlugin(Star):
             self._log_warn(f"配置保存失败: {e}")
         await self._reply(
             event,
-            f"默认最高音质已设为 {q}\n可选: 128 / m4a / 320 / flac / ape / hires / atmos / master / atmos_master",
+            f"默认最高音质已设为 {q}\n"
+            "可选: 128 / m4a / 320 / flac / ape / hires / atmos / master / atmos_master",
         )
         event.stop_event()
 
-    @filter.regex(re.compile(r"^#?(qqm测试|qq音乐测试)$", re.IGNORECASE), priority=6)
+    @filter.regex(
+        re.compile(r"^#?(?:qq|QQ)m\s*(?:测试|ping)$|^#?(?:qq|QQ)音乐测试$", re.IGNORECASE),
+        priority=6,
+    )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def ping(self, event: AstrMessageEvent):
+        """#qqm 测试 测试 API 连通（主人）"""
 
 
         try:
             data = await qqapi.request("/")
             await self._reply(
                 event,
-                f"API 正常\nroutes: {len(data.get('routes') or [])}\n已登录: {len(data.get('accounts') or [])}",
+                f"API 正常\nroutes: {len(data.get('routes') or [])}"
+                f"\n已登录: {len(data.get('accounts') or [])}",
             )
         except Exception as err:
             await self._reply(event, f"API 不可用：{err}")
@@ -3309,6 +3365,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def list_accounts(self, event: AstrMessageEvent):
+        """#qqm账号 已登录账号列表（主人）"""
 
 
         try:
@@ -3335,6 +3392,7 @@ class QQMusicPlugin(Star):
     @filter.regex(re.compile(r"^#?(qqm更新|qq音乐更新)$", re.IGNORECASE), priority=6)
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def update(self, event: AstrMessageEvent):
+        """#qqm更新 拉取最新插件代码（主人）"""
 
 
         from .updater import get_local_version, update_plugin
@@ -3353,13 +3411,15 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def force_update(self, event: AstrMessageEvent):
+        """#qqm强制更新 丢弃本地改动并同步远程（主人）"""
 
 
         from .updater import get_local_version, update_plugin
 
         await self._reply(
             event,
-            f"开始强制更新 qqmusic-plugin（v{get_local_version(PLUGIN_DIR)}）…\n将丢弃插件目录内未提交的本地修改",
+            f"开始强制更新 qqmusic-plugin（v{get_local_version(PLUGIN_DIR)}）…\n"
+            "将丢弃插件目录内未提交的本地修改",
         )
         ret = await update_plugin(PLUGIN_DIR, force=True)
         await self._reply(
@@ -3373,6 +3433,7 @@ class QQMusicPlugin(Star):
     )
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def update_log(self, event: AstrMessageEvent):
+        """#qqm更新日志 查看最近提交（主人）"""
 
 
         from .updater import get_update_log

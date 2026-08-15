@@ -183,7 +183,10 @@ async def update_plugin(plugin_dir: str, *, force: bool = False) -> dict:
         if changed:
             msg += f"\n变更文件:\n{diff_out.strip()[:500]}"
         if re.search(r"(^|\n)requirements\.txt($|\n)", diff_out):
-            msg += "\n⚠️ requirements.txt 有变更，请重启 AstrBot 或手动执行 pip install -r requirements.txt"
+            msg += (
+                "\n⚠️ requirements.txt 有变更，"
+                "请重启 AstrBot 或手动执行 pip install -r requirements.txt"
+            )
         msg += "\n重启 AstrBot 使插件代码生效"
         return {
             "ok": True,

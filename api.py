@@ -14,7 +14,10 @@ from .quality import (
     quality_candidates,
 )
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 # 模块级配置访问器，由 main.py 在插件加载时注入
 _cfg_getter = None
@@ -130,10 +133,10 @@ async def request(
                 async with sess.get(
                     url, params=_query_safe_params(params), headers=headers or None
                 ) as res:
-                    return await _handle_response(res, base, url)
+                    return await _handle_response(res)
             else:
                 async with sess.post(url, json=params, headers=headers or None) as res:
-                    return await _handle_response(res, base, url)
+                    return await _handle_response(res)
     except aiohttp.ClientConnectorError as e:
         raise ApiError(f"无法连接 QQ 音乐 API（{base}），请先申请API") from e
     except aiohttp.ServerTimeoutError as e:
@@ -142,7 +145,7 @@ async def request(
         raise ApiError(f"网络错误：{e}") from e
 
 
-async def _handle_response(res: aiohttp.ClientResponse, base: str, url: str):
+async def _handle_response(res: aiohttp.ClientResponse):
     status = res.status
     if status == 401:
         raise ApiError(
@@ -156,9 +159,9 @@ async def _handle_response(res: aiohttp.ClientResponse, base: str, url: str):
         raise ApiError(f"HTTP {status}")
     try:
         data = await res.json(content_type=None)
-    except Exception:
+    except Exception as e:
         text = await res.text()
-        raise ApiError(f"返回非 JSON：{text[:200]}")
+        raise ApiError(f"返回非 JSON：{text[:200]}") from e
 
     result = data.get("result") if isinstance(data, dict) else None
     if result not in (None, 100, 0):
@@ -279,10 +282,11 @@ def _normalize_search_item(item: dict, idx: int = 0) -> dict | None:
 
     album = raw.get("album") if isinstance(raw.get("album"), dict) else {}
     albummid = raw.get("albummid") or album.get("mid") or ""
-    if albummid:
-        cover = cover_url(albummid)
-    else:
-        cover = album.get("pic") or album.get("cover") or ""
+    cover = (
+        cover_url(albummid)
+        if albummid
+        else album.get("pic") or album.get("cover") or ""
+    )
     interval = _safe_num(raw.get("interval") or raw.get("songTime") or 0)
     interval = int(interval)
     duration = f"{interval // 60:02d}:{interval % 60:02d}" if interval > 0 else ""
@@ -732,7 +736,11 @@ async def mv_by_tag(
         user_key,
     )
     d = unwrap_data(body)
-    raw = d.get("list") if isinstance(d.get("list"), list) else (d.get("mvlist") if isinstance(d.get("mvlist"), list) else [])
+    raw = (
+        d.get("list")
+        if isinstance(d.get("list"), list)
+        else (d.get("mvlist") if isinstance(d.get("mvlist"), list) else [])
+    )
     return {
         "list": [n for n in (normalize_mv_item(it, i) for i, it in enumerate(raw)) if n],
         "total": int(_safe_num(d.get("total") or 0)),
@@ -821,7 +829,7 @@ async def recommend_feed(user_key: str = "") -> list:
                         )
         if not playlists:
             return []
-        pl = random.choice(playlists)
+        pl = random.choice(playlists)  # noqa: S311 非安全场景（随机推荐歌单）
         detail = await songlist_detail(pl["disstid"], user_key)
         return detail.get("songlist") or []
     except Exception:

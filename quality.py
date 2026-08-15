@@ -76,7 +76,9 @@ def is_quality_size_ok(type_: str, file: dict | None = None) -> bool:
     if not isinstance(file, dict):
         return True
     t = (type_ or "").lower()
-    n = lambda k: _num(file.get(k))
+
+    def n(k: str) -> float:
+        return _num(file.get(k))
 
     if t == "128":
         return n("size_128mp3") > 0 or n("size_96aac") > 0 or n("size_48aac") > 0

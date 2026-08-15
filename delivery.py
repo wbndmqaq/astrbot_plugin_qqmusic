@@ -15,7 +15,10 @@ from astrbot.api.message_components import File, Record
 from . import api as qqapi
 from .quality import QUALITY_LABEL
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 # 被动回复受限平台：QQ 官方机器人
@@ -504,8 +507,8 @@ async def deliver_song(
         await plugin._send_chain(event, *comps)
 
     # 语音 / OneBot 群文件都需要「紧凑 mp3」：FLAC 直接作语音会被协议端拒；
-    # OneBot(NTQQ) 群文件对 .flac 也常报「未知文件类型或路径不存在」。其余平台群文件保留原始高音质文件。
-    # 低音质只用于语音（禁用高清语音时 PC 可播）；仅作群文件兜底时仍保高音质。
+    # OneBot(NTQQ) 群文件对 .flac 也常报「未知文件类型或路径不存在」。
+    # 其余平台群文件保留原始高音质文件；低音质只用于语音（禁用高清语音时 PC 可播）。
     # 无语音平台（weixin_oc 等）语音被跳过时不压缩，避免浪费编码
     is_onebot = _is_onebot(event)
     no_vocal = _no_vocal(event)
@@ -543,6 +546,11 @@ async def deliver_song(
         # OneBot：有压缩版优先传压缩 mp3（可靠）；其余平台 / 无压缩版保留原始文件
         # QQ 官方：大文件默认发原始文件走适配器分片上传（AstrBot ≥4.27.3，>10MB 自动分片）；
         # 分片不可用/关闭且是大文件时改传压缩 mp3 兜底（旧版大 FLAC 直发必败）
+        comp_display = (
+            file_display.rsplit(".", 1)[0] + "_压缩版.mp3"
+            if "." in file_display
+            else "QQ音乐_压缩版.mp3"
+        )
         is_qqofficial = _is_passive_limited(event)
         qq_large_file = False
         if is_qqofficial:
@@ -551,24 +559,12 @@ async def deliver_song(
             except OSError:
                 qq_large_file = False
         qq_chunk = is_qqofficial and _qq_chunked_available(cfg) and qq_large_file
-        if is_onebot and has_compressed:
-            comp_display = (
-                file_display.rsplit(".", 1)[0] + "_压缩版.mp3"
-                if "." in file_display
-                else "QQ音乐_压缩版.mp3"
-            )
-            try:
-                await _send_media(File(comp_display, file=vocal_path))
-                pending_text = ""
-            except Exception as e:
-                plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
-        elif is_qqofficial and has_compressed and qq_large_file and not qq_chunk:
-            # QQ 官方大文件但分片不可用/关闭 → 压缩 mp3 兜底
-            comp_display = (
-                file_display.rsplit(".", 1)[0] + "_压缩版.mp3"
-                if "." in file_display
-                else "QQ音乐_压缩版.mp3"
-            )
+        # 走压缩 mp3 的两类情形：OneBot 群文件 / QQ 官方大文件但分片不可用
+        use_compressed = has_compressed and (
+            is_onebot
+            or (is_qqofficial and qq_large_file and not qq_chunk)
+        )
+        if use_compressed:
             try:
                 await _send_media(File(comp_display, file=vocal_path))
                 pending_text = ""
