@@ -1,6 +1,15 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v1.7.2] - Playwright 自动安装与镜像加速 + 市场 metadata 规范
+
+*   **⚡ Playwright 自动安装与镜像加速**:
+    *   本地 HTML 卡片渲染若检测到系统未安装 Playwright Chromium 二进制，自动使用当前 Python 环境（`sys.executable`）在后台子线程中静默安装并恢复渲染；
+    *   自动配置国内镜像源（`PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/`）加速下载，大幅缩短安装耗时；
+    *   Chromium 启动参数补充 `--no-sandbox`、`--disable-setuid-sandbox`、`--disable-dev-shm-usage` 等，彻底解决 Docker / Linux 容器环境下 `/dev/shm` 内存不足崩溃的问题。
+*   **🏷 市场元数据补全**: `metadata.yaml` 补充 `social_link` 与 `tags` 分类标签。
+
+---
 ## [v1.7.1] - 指令描述全覆盖 + 测试基建 + 石山清理 + 全仓 ruff 零告警
 
 *   **📋 指令描述全覆盖**: 34/36 个 handler 缺失 docstring（WebUI 指令列表显示「无描述」）全部补齐，

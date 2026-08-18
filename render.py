@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import subprocess
+import sys
 
-# Chromium 启动参数（对齐原 JS 插件 puppeteer 启动参数）
+from astrbot.api import logger
+
+# Chromium 启动参数（对齐原 JS 插件 puppeteer 启动参数 + Docker 防崩溃）
 _CHROME_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -18,6 +23,19 @@ _browser = None
 _lock = asyncio.Lock()
 
 
+def _install_chromium_sync():
+    """在子线程中同步执行 playwright install chromium（附带 npmmirror 加速镜像源）。"""
+    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    logger.info(f"[qqmusic] 正在自动安装 Playwright Chromium: {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["PLAYWRIGHT_DOWNLOAD_HOST"] = "https://npmmirror.com/mirrors/playwright/"
+    res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if res.returncode != 0:
+        logger.error(f"[qqmusic] 自动安装 Chromium 失败: {res.stderr}")
+        raise RuntimeError(f"Playwright Chromium 安装失败: {res.stderr or res.stdout}")
+    logger.info("[qqmusic] Playwright Chromium 安装完成！")
+
+
 async def _get_browser():
 
     global _playwright, _browser
@@ -28,10 +46,22 @@ async def _get_browser():
             from playwright.async_api import async_playwright
 
             _playwright = await async_playwright().start()
-            _browser = await _playwright.chromium.launch(
-                headless=True,
-                args=_CHROME_ARGS,
-            )
+            try:
+                _browser = await _playwright.chromium.launch(
+                    headless=True,
+                    args=_CHROME_ARGS,
+                )
+            except Exception as e:
+                err_msg = str(e)
+                if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
+                    logger.warning("[qqmusic] 未找到 Playwright Chromium，正在尝试通过 npmmirror 镜像源自动下载安装...")
+                    await asyncio.to_thread(_install_chromium_sync)
+                    _browser = await _playwright.chromium.launch(
+                        headless=True,
+                        args=_CHROME_ARGS,
+                    )
+                else:
+                    raise e
     return _browser
 
 
