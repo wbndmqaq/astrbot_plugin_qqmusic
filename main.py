@@ -395,6 +395,74 @@ class QQMusicPlugin(Star):
         finally:
             event.stop_event()
 
+    async def _start_select(
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        kw: str,
+        *,
+        label: str,
+        verb: str,
+        user_key: str,
+    ) -> None:
+        """进入"先选歌再操作"流程。
+
+        带关键词→搜索出候选列表；不带→复用会话列表（无列表则提示先搜）。
+        列表写入会话并记录 ``action``（#qqm听N 消费后一次性执行，用完恢复播放）。
+        """
+        cfg = self._cfg()
+        scope = self._scope(event)
+        session = await cardlib.SessionStore.get(self, scope)
+        if (kw or "").strip():
+            try:
+                page_size = min(int(cfg.get("maxList") or 10), 20)
+                lst = await qqapi.search_songs(
+                    kw, page_size=page_size, user_key=user_key
+                )
+            except Exception as err:  # noqa: BLE001  # 防御：搜索失败不崩 handler
+                self._log_warn(f"{label}选歌搜索失败: {err}")
+                await self._reply(event, f"搜索失败：{err}")
+                return
+            if not lst:
+                await self._reply(event, f"没有搜到「{kw}」")
+                return
+            keyword = kw
+        else:
+            lst = (session or {}).get("data") or []
+            # 会话非歌曲列表（如 MV 列表 / 榜单分类）时不可复用，提示先搜
+            if not lst or not (
+                isinstance(lst[0], dict) and lst[0].get("songmid")
+            ):
+                await self._reply(
+                    event,
+                    f"用法：先 #qqm点歌 关键词 选中歌曲，再发 #qqm{label}；或直接 #qqm{label} 关键词 选择",
+                )
+                return
+            keyword = (session or {}).get("keyword") or "当前会话"
+        base = dict(session) if session else {}
+        base.update(
+            {"type": "songs", "keyword": keyword, "data": lst, "action": action}
+        )
+        await cardlib.SessionStore.set(self, scope, base)
+        tip = f"回复 #qqm听N 即可{verb}"
+        if cfg.get("renderListCard", True):
+            data = cardlib.build_list_card_data(
+                keyword, lst, options={"tip": tip}, cfg=cfg
+            )
+            if await self._reply_card_or_text(
+                event,
+                tpl_name="qqmusic-list",
+                data=data,
+                format_text=lambda d: cardlib.format_song_list(lst, keyword)
+                + f"\n回复 #qqm听N 即可{verb}",
+            ):
+                return
+        await self._reply(
+            event,
+            cardlib.format_song_list(lst, keyword)
+            + f"\n回复 #qqm听N 即可{verb}",
+        )
+
     @filter.regex(r"^#?(qq|QQ)m\s*(推荐)?听\s*([1-9][0-9]?)$|^#听\s*([1-9][0-9]?)$")
     async def choose_song(self, event: AstrMessageEvent):
         """#qqm听N / #qqm推荐听N 播放当前会话列表第 N 首"""
@@ -439,6 +507,30 @@ class QQMusicPlugin(Star):
             return
         song = session["data"][n - 1]
         user_key = self._user_key(event)
+        action = session.get("action") or "play"
+        # 待办动作一次性消费：先清掉 action，避免下次 #qqm听N 误触发
+        if action != "play":
+            try:
+                _s = dict(session)
+                _s["action"] = "play"
+                await cardlib.SessionStore.set(self, scope, _s)
+            except Exception:  # noqa: S110, BLE001  # 消费失败不影响本次执行
+                pass
+        if action != "play":
+            try:
+                if action == "lyric":
+                    await self._show_lyric(event, song, user_key)
+                elif action == "comment":
+                    await self._show_comment(event, song, user_key)
+                elif action == "mv":
+                    await self._show_mv(event, song, user_key)
+                else:
+                    await self._reply(event, f"未知动作：{action}")
+            except Exception as err:  # noqa: BLE001  # 防御：动作执行失败不崩 handler
+                self._log_warn(f"执行失败: {err}")
+                await self._reply(event, f"操作失败：{err}")
+            event.stop_event()
+            return
         play = await self._resolve_play(song, cfg, user_key)
         # 记住本曲 MV，支持「#qqmMV 播放/下载」（不带参数）直接操作该曲 MV
         mv_vid = play.get("mvVid") or ""
@@ -607,66 +699,68 @@ class QQMusicPlugin(Star):
 
     # ══════════════════ 歌词/热搜/帮助 ══════════════════
 
-    @filter.regex(r"^#?(qq|QQ)m\s*歌词\s*(.+)$")
+    @filter.regex(r"^#?(qq|QQ)m\s*歌词\s*(.*)$")
     async def get_lyric(self, event: AstrMessageEvent):
-        """#qqm歌词 关键词 查询歌词"""
+        """#qqm歌词 [关键词]：先选歌（回复 #qqm听N）再显示歌词"""
 
 
         cfg = self._cfg()
         if not cfg.get("enable", True):
             return
         m = re.match(
-            r"^#?(?:qq|QQ)m\s*歌词\s*(.+)$", event.message_str.strip(), re.IGNORECASE
+            r"^#?(?:qq|QQ)m\s*歌词\s*(.*)$", event.message_str.strip(), re.IGNORECASE
         )
-        key = m.group(1).strip() if m else ""
-        if not key:
-            await self._reply(event, "用法：#qqm歌词 关键词")
-            event.stop_event()
+        if not m:
+            return
+        await self._start_select(
+            event,
+            "lyric",
+            m.group(1).strip(),
+            label="歌词",
+            verb="查看歌词",
+            user_key=self._user_key(event),
+        )
+        event.stop_event()
+
+    async def _show_lyric(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
+        """显示所选歌曲的歌词（#qqm听N 触发）。"""
+        songmid = song.get("songmid") or song.get("songMid") or ""
+        if not songmid:
+            await self._reply(event, "该歌曲缺少 songmid，无法获取歌词")
             return
         try:
-            songmid = key
-            song_meta = {
-                "songName": key,
-                "singerName": "",
-                "cover": "",
-                "albumName": "",
-            }
-            if not re.match(r"^[0-9A-Za-z]{10,}$", key):
-                lst = await qqapi.search_songs(key, page_size=1)
-                if not lst:
-                    await self._reply(event, "未找到歌曲")
-                    event.stop_event()
-                    return
-                songmid = lst[0]["songmid"]
-                song_meta = {
-                    k: lst[0].get(k) or ""
-                    for k in ("songName", "singerName", "cover", "albumName")
-                }
-                song_meta["songName"] = song_meta["songName"] or key
-            data = await qqapi.lyric(songmid, self._user_key(event))
-            text = (data or {}).get("lyric") or ""
-            lines = [
-                re.sub(r"^\[[^\]]*]", "", ln).strip()
-                for ln in text.split("\n")
-                if ln.strip()
-            ]
-            lines = [ln for ln in lines if ln][:40]
-            if not lines:
-                await self._reply(event, "暂无歌词")
-                event.stop_event()
-                return
-            card = cardlib.build_lyric_card_data(
-                **{**song_meta, "songmid": songmid, "lines": lines}, cfg=self._cfg()
-            )
-            await self._reply_card_or_text(
-                event,
-                tpl_name="qqmusic-lyric",
-                data=card,
-                format_text=cardlib.format_lyric_text,
-            )
-        except Exception as err:
+            data = await qqapi.lyric(songmid, user_key)
+        except Exception as err:  # noqa: BLE001  # 防御：歌词失败不崩 handler
+            self._log_warn(f"歌词失败: {err}")
             await self._reply(event, f"歌词失败：{err}")
-        event.stop_event()
+            return
+        text = (data or {}).get("lyric") or ""
+        lines = [
+            re.sub(r"^\[[^\]]*]", "", ln).strip()
+            for ln in text.split("\n")
+            if ln.strip()
+        ]
+        lines = [ln for ln in lines if ln][:40]
+        if not lines:
+            await self._reply(event, "暂无歌词")
+            return
+        song_name = song.get("songName") or ""
+        singer_name = song.get("singerName") or ""
+        card = cardlib.build_lyric_card_data(
+            song_name=song_name,
+            singer_name=singer_name,
+            cover=song.get("cover") or "",
+            album_name=song.get("albumName") or "",
+            songmid=songmid,
+            lines=lines,
+            cfg=self._cfg(),
+        )
+        await self._reply_card_or_text(
+            event,
+            tpl_name="qqmusic-lyric",
+            data=card,
+            format_text=cardlib.format_lyric_text,
+        )
 
     @filter.regex(r"^#?(qq|QQ)m\s*热搜$")
     async def hot_search(self, event: AstrMessageEvent):
@@ -1051,131 +1145,189 @@ class QQMusicPlugin(Star):
                     "singerName": "",
                 }
 
+            await self._deliver_mv(event, mv_obj, download=is_dl, user_key=user_key)
+            event.stop_event()
+            return
+
+        # ── 分类浏览：#qqmMV 分类 [序号/分类名] ──
+        if rest.startswith("分类"):
+            cat_rest = rest[len("分类") :].strip()
             try:
-                url = await qqapi.mv_url(mv_obj["vid"], user_key)
-                if not url:
-                    await self._reply(event, "获取 MV 播放链接失败，可能需 #qqm登录")
+                cats = await qqapi.mv_category(user_key)
+            except Exception as err:
+                self._log_warn(f"MV 分类失败: {err}")
+                cats = {"area": [], "version": [], "list": []}
+            all_cats = (
+                (cats.get("area") or [])
+                + (cats.get("version") or [])
+                + (cats.get("list") or [])
+            )
+            if not all_cats:
+                await self._reply(event, "没有获取到 MV 分类")
+                event.stop_event()
+                return
+            if not cat_rest:
+                lines = ["♫ MV 分类"]
+                for i, t in enumerate(all_cats):
+                    lines.append(f"{i + 1}. {t.get('name') or t.get('title') or ''}")
+                lines.append("\n发送 #qqmMV 分类 序号 或 #qqmMV 分类 分类名 浏览该类 MV")
+                await self._reply(event, "\n".join(lines))
+                event.stop_event()
+                return
+            try:
+                idx = int(cat_rest) - 1
+                tag = (
+                    all_cats[idx] if (idx >= 0 and idx < len(all_cats)) else None
+                )
+            except (ValueError, TypeError):
+                tag = next(
+                    (
+                        t
+                        for t in all_cats
+                        if cat_rest
+                        in str(t.get("name") or t.get("title") or "")
+                    ),
+                    None,
+                )
+            if not tag:
+                await self._reply(event, f"未找到分类「{cat_rest}」")
+                event.stop_event()
+                return
+            try:
+                res = await qqapi.mv_by_tag(
+                    tag.get("id") or tag.get("tagId"),
+                    page_size=20,
+                    user_key=user_key,
+                )
+                lst = res.get("list") or []
+                if not lst:
+                    await self._reply(event, "该分类暂无 MV")
                     event.stop_event()
                     return
+                await cardlib.SessionStore.set(
+                    self,
+                    scope,
+                    {
+                        "type": "mvList",
+                        "data": lst,
+                    },
+                )
+                await self._reply(
+                    event,
+                    cardlib.format_mv_list_text(lst[:15])
+                    + "\n\n发 #qqmMV 播放 / 下载 序号",
+                )
             except Exception as err:
-                await self._reply(event, f"获取 MV 播放链接失败：{err}")
-                event.stop_event()
-                return
-
-            # MV 详情卡（复用 qqmusic-detail 模板）
-            # 受限平台（qq_official 被动回复受限）把卡片并入视频同一条消息，省被动回复额度
-            passive_limited = _is_passive_limited(event)
-            img_path = ""
-            try:
-                card = cardlib.build_mv_card_data(mv_obj, cfg=self._cfg())
-                img_path = await self._render_card(event, card, "qqmusic-detail") or ""
-                if img_path and not passive_limited:
-                    await self._send_chain(event, Image.fromFileSystem(img_path))
-                elif not img_path:
-                    await self._reply(event, cardlib.format_mv_text(mv_obj))
-            except Exception:
-                await self._reply(event, cardlib.format_mv_text(mv_obj))
-
-            ret = await deliver_video(
-                self,
-                event,
-                mv_obj,
-                url,
-                cfg=self._cfg(),
-                plugin_dir=PLUGIN_DIR,
-                download=is_dl,
-                extra=[Image.fromFileSystem(img_path)] if (img_path and passive_limited) else None,
-            )
-            if not ret.get("ok"):
-                # 视频/文件均失败：本地文件还在则再试一次发下载文件，否则回退链接
-                fp = ret.get("filePath") or ""
-                sent_file = False
-                if fp and os.path.exists(fp):
-                    title_f = mv_obj.get("mvtitle") or mv_obj.get("name") or "MV"
-                    try:
-                        await self._send_chain(
-                            event,
-                            File(
-                                re.sub(r'[\\/:*?"<>|]', "", str(title_f))[:30] + ".mp4",
-                                file=fp,
-                            ),
-                        )
-                        sent_file = True
-                        _schedule_cleanup(fp, int(self._cfg().get("keepFileSec", 120)))
-                    except Exception:
-                        pass
-                if sent_file:
-                    await self._reply(event, "视频消息发送失败，已改发下载文件")
-                else:
-                    await self._reply(event, f"视频发送失败，可点击查看：{url}")
+                self._log_warn(f"MV 分类浏览失败: {err}")
+                await self._reply(event, f"MV 分类浏览失败：{err}")
             event.stop_event()
             return
 
-        # ── 分类浏览（无动词）──
-        try:
-            cats = await qqapi.mv_category(user_key)
-        except Exception as err:
-            self._log_warn(f"MV 分类失败: {err}")
-            cats = {"area": [], "version": [], "list": []}
-        all_cats = (
-            (cats.get("area") or [])
-            + (cats.get("version") or [])
-            + (cats.get("list") or [])
+        # ── 无动词：先选歌再查看 MV ──
+        await self._start_select(
+            event,
+            "mv",
+            rest,
+            label="MV",
+            verb="查看MV",
+            user_key=user_key,
         )
-        if not all_cats:
-            await self._reply(event, "没有获取到 MV 分类")
-            event.stop_event()
-            return
-        if not rest:
-            lines = ["♫ MV 分类"]
-            for i, t in enumerate(all_cats):
-                lines.append(f"{i + 1}. {t.get('name') or t.get('title') or ''}")
-            lines.append("\n发送 #qqmMV 序号 或 #qqmMV 分类名 浏览该类 MV")
-            await self._reply(event, "\n".join(lines))
-            event.stop_event()
-            return
-        try:
-            idx = int(rest) - 1
-            tag = all_cats[idx] if (idx >= 0 and idx < len(all_cats)) else None
-        except (ValueError, TypeError):
-            tag = next(
-                (
-                    t
-                    for t in all_cats
-                    if rest in str(t.get("name") or t.get("title") or "")
-                ),
-                None,
-            )
-        if not tag:
-            await self._reply(event, f"未找到分类「{rest}」")
-            event.stop_event()
-            return
-        try:
-            res = await qqapi.mv_by_tag(
-                tag.get("id") or tag.get("tagId"), page_size=20, user_key=user_key
-            )
-            lst = res.get("list") or []
-            if not lst:
-                await self._reply(event, "该分类暂无 MV")
-                event.stop_event()
-                return
-            await cardlib.SessionStore.set(
-                self,
-                scope,
-                {
-                    "type": "mvList",
-                    "data": lst,
-                },
-            )
-            await self._reply(
-                event,
-                cardlib.format_mv_list_text(lst[:15])
-                + "\n\n发 #qqmMV 播放 / 下载 序号",
-            )
-        except Exception as err:
-            self._log_warn(f"MV 分类浏览失败: {err}")
-            await self._reply(event, f"MV 分类浏览失败：{err}")
         event.stop_event()
+
+    async def _deliver_mv(
+        self,
+        event: AstrMessageEvent,
+        mv_obj: dict,
+        *,
+        download: bool,
+        user_key: str,
+    ) -> bool:
+        """获取 MV 播放链接并投递视频/下载文件/链接。成功返回 True。"""
+        try:
+            url = await qqapi.mv_url(mv_obj["vid"], user_key)
+            if not url:
+                await self._reply(event, "获取 MV 播放链接失败，可能需 #qqm登录")
+                return False
+        except Exception as err:
+            await self._reply(event, f"获取 MV 播放链接失败：{err}")
+            return False
+
+        # MV 详情卡（复用 qqmusic-detail 模板）
+        # 受限平台（qq_official 被动回复受限）把卡片并入视频同一条消息，省被动回复额度
+        passive_limited = _is_passive_limited(event)
+        img_path = ""
+        try:
+            card = cardlib.build_mv_card_data(mv_obj, cfg=self._cfg())
+            img_path = await self._render_card(event, card, "qqmusic-detail") or ""
+            if img_path and not passive_limited:
+                await self._send_chain(event, Image.fromFileSystem(img_path))
+            elif not img_path:
+                await self._reply(event, cardlib.format_mv_text(mv_obj))
+        except Exception:
+            await self._reply(event, cardlib.format_mv_text(mv_obj))
+
+        ret = await deliver_video(
+            self,
+            event,
+            mv_obj,
+            url,
+            cfg=self._cfg(),
+            plugin_dir=PLUGIN_DIR,
+            download=download,
+            extra=[Image.fromFileSystem(img_path)]
+            if (img_path and passive_limited)
+            else None,
+        )
+        if not ret.get("ok"):
+            # 视频/文件均失败：本地文件还在则再试一次发下载文件，否则回退链接
+            fp = ret.get("filePath") or ""
+            sent_file = False
+            if fp and os.path.exists(fp):
+                title_f = mv_obj.get("mvtitle") or mv_obj.get("name") or "MV"
+                try:
+                    await self._send_chain(
+                        event,
+                        File(
+                            re.sub(r'[\\/:*?"<>|]', "", str(title_f))[:30] + ".mp4",
+                            file=fp,
+                        ),
+                    )
+                    sent_file = True
+                    _schedule_cleanup(
+                        fp, int(self._cfg().get("keepFileSec", 120))
+                    )
+                except Exception:
+                    pass
+            if sent_file:
+                await self._reply(event, "视频消息发送失败，已改发下载文件")
+            else:
+                await self._reply(event, f"视频发送失败，可点击查看：{url}")
+        return True
+
+    async def _show_mv(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
+        """播放所选歌曲的 MV（#qqm听N 触发）。"""
+        song_vid = song.get("mvVid") or ""
+        if not song_vid:
+            songmid = song.get("songmid") or ""
+            if songmid:
+                try:
+                    infos = await qqapi.song_info_batch(
+                        [songmid], user_key=user_key
+                    )
+                    song_vid = (infos[0].get("mvVid") if infos else "") or ""
+                except Exception:  # noqa: S110, BLE001  # 查 MV 徽标为可选项，失败忽略
+                    pass
+        if not song_vid:
+            await self._reply(event, "该曲没有 MV")
+            return
+        mv_obj = {
+            "vid": song_vid,
+            "mvtitle": song.get("songName") or "本曲 MV",
+            "name": song.get("songName") or "本曲 MV",
+            "singerName": song.get("singerName") or "",
+            "cover": song.get("cover") or "",
+        }
+        await self._deliver_mv(event, mv_obj, download=False, user_key=user_key)
 
     @filter.regex(r"^#?(qq|QQ)m\s*推荐$")
     async def recommend(self, event: AstrMessageEvent):
@@ -1622,106 +1774,107 @@ class QQMusicPlugin(Star):
             await self._reply(event, "歌单搜索失败，请稍后重试")
         event.stop_event()
 
-    @filter.regex(r"^#?(qq|QQ)m\s*评论\s+(.+)$")
+    @filter.regex(r"^#?(qq|QQ)m\s*评论\s*(.*)$")
     async def get_comment(self, event: AstrMessageEvent):
-        """#qqm评论 关键词 查看歌曲热门评论"""
+        """#qqm评论 [关键词]：先选歌（回复 #qqm听N）再显示热评"""
 
 
         cfg = self._cfg()
         if not cfg.get("enable", True):
             return
         m = re.match(
-            r"^#?(?:qq|QQ)m\s*评论\s+(.+)$", event.message_str.strip(), re.IGNORECASE
+            r"^#?(?:qq|QQ)m\s*评论\s*(.*)$", event.message_str.strip(), re.IGNORECASE
         )
-        keyword = m.group(1).strip() if m else ""
-        if not keyword:
+        if not m:
             return
-        user_key = self._user_key(event)
+        await self._start_select(
+            event,
+            "comment",
+            m.group(1).strip(),
+            label="评论",
+            verb="查看评论",
+            user_key=self._user_key(event),
+        )
+        event.stop_event()
+
+    async def _show_comment(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
+        """显示所选歌曲的热门评论（#qqm听N 触发）。"""
+        songid = song.get("songid") or song.get("songId") or ""
+        if not songid:
+            await self._reply(event, "未能获取歌曲ID，无法查询评论")
+            return
         try:
-            await self._reply(event, f"正在搜索：{keyword}")
-            lst = await qqapi.search_songs(keyword, page_size=3, user_key=user_key)
-            if not lst:
-                await self._reply(event, "没有找到相关歌曲")
-                event.stop_event()
-                return
-            song = next((s for s in lst if s.get("songid")), lst[0])
-            if not song.get("songid"):
-                await self._reply(event, "未能获取歌曲ID，无法查询评论")
-                event.stop_event()
-                return
             result = await qqapi.comment(
-                song["songid"], page_size=20, user_key=user_key
+                songid, page_size=20, user_key=user_key
             )
-            hot = (
-                (result.get("hot_comment") or {}).get("commentlist")
-                if isinstance(result.get("hot_comment"), dict)
-                else result.get("hot_comment") or []
+        except Exception as err:  # noqa: BLE001  # 防御：评论失败不崩 handler
+            self._log_warn(f"评论失败: {err}")
+            await self._reply(event, "评论获取失败，请稍后重试")
+            return
+        hot = (
+            (result.get("hot_comment") or {}).get("commentlist")
+            if isinstance(result.get("hot_comment"), dict)
+            else result.get("hot_comment") or []
+        )
+        normal = (
+            (result.get("comment") or {}).get("commentlist")
+            if isinstance(result.get("comment"), dict)
+            else result.get("comment") or []
+        )
+        all_comments = (hot if isinstance(hot, list) else []) + (
+            normal if isinstance(normal, list) else []
+        )
+        if not all_comments:
+            await self._reply(
+                event,
+                f"【{song.get('songName')} - {song.get('singerName')}】\n暂无评论",
             )
-            normal = (
-                (result.get("comment") or {}).get("commentlist")
-                if isinstance(result.get("comment"), dict)
-                else result.get("comment") or []
+            return
+        # 对齐原插件：cleanCommentText 清洗（表情代码/[音频]标记/\\r\\n）
+        # + middlecommentcontent 字段
+        comment_lines = []
+        for i, c in enumerate(all_comments[:10]):
+            nick = c.get("nick") or c.get("nickname") or "匿名"
+            text = cardlib.clean_comment_text(
+                c.get("rootcommentcontent")
+                or c.get("middlecommentcontent")
+                or c.get("content")
+                or c.get("comment")
             )
-            all_comments = (hot if isinstance(hot, list) else []) + (
-                normal if isinstance(normal, list) else []
+            likes = c.get("praisenum") or c.get("likeCount") or 0
+            comment_lines.append(f"{i + 1}. {nick}（{likes}赞）：{str(text)[:80]}")
+        if self._cfg().get("renderListCard", True):
+            # 独立评论卡片：每条评论一个格子（头像 + 昵称 + 时间 + 内容 + 赞数）
+            card = cardlib.build_comment_card_data(
+                song_name=song.get("songName", ""),
+                singer_name=song.get("singerName", ""),
+                cover=song.get("cover") or "",
+                album_name=song.get("albumName") or "",
+                songmid=song.get("songmid") or "",
+                comments=all_comments[:10],
+                cfg=self._cfg(),
             )
-            if not all_comments:
-                await self._reply(
-                    event,
-                    f"【{song.get('songName')} - {song.get('singerName')}】\n暂无评论",
-                )
-                event.stop_event()
+            header = [
+                f"♫ {song.get('songName')} - {song.get('singerName')} 热门评论",
+                "",
+            ]
+            if await self._reply_card_or_text(
+                event,
+                tpl_name="qqmusic-comment",
+                data=card,
+                format_text=lambda d: "\n".join(header + comment_lines),
+            ):
                 return
-            # 对齐原插件：cleanCommentText 清洗（表情代码/[音频]标记/\\r\\n）
-            # + middlecommentcontent 字段
-            comment_lines = []
-            for i, c in enumerate(all_comments[:10]):
-                nick = c.get("nick") or c.get("nickname") or "匿名"
-                text = cardlib.clean_comment_text(
-                    c.get("rootcommentcontent")
-                    or c.get("middlecommentcontent")
-                    or c.get("content")
-                    or c.get("comment")
-                )
-                likes = c.get("praisenum") or c.get("likeCount") or 0
-                comment_lines.append(f"{i + 1}. {nick}（{likes}赞）：{str(text)[:80]}")
-            if cfg.get("renderListCard", True):
-                # 独立评论卡片：每条评论一个格子（头像 + 昵称 + 时间 + 内容 + 赞数）
-                card = cardlib.build_comment_card_data(
-                    song_name=song.get("songName", ""),
-                    singer_name=song.get("singerName", ""),
-                    cover=song.get("cover") or "",
-                    album_name=song.get("albumName") or "",
-                    songmid=song.get("songmid") or "",
-                    comments=all_comments[:10],
-                    cfg=self._cfg(),
-                )
-                header = [
+        await self._reply(
+            event,
+            "\n".join(
+                [
                     f"♫ {song.get('songName')} - {song.get('singerName')} 热门评论",
                     "",
                 ]
-                if await self._reply_card_or_text(
-                    event,
-                    tpl_name="qqmusic-comment",
-                    data=card,
-                    format_text=lambda d: "\n".join(header + comment_lines),
-                ):
-                    event.stop_event()
-                    return
-            await self._reply(
-                event,
-                "\n".join(
-                    [
-                        f"♫ {song.get('songName')} - {song.get('singerName')} 热门评论",
-                        "",
-                    ]
-                    + comment_lines
-                ),
-            )
-        except Exception as err:
-            self._log_warn(f"评论失败: {err}")
-            await self._reply(event, "评论获取失败，请稍后重试")
-        event.stop_event()
+                + comment_lines
+            ),
+        )
 
     # ══════════════════ 智能解析 ══════════════════
 

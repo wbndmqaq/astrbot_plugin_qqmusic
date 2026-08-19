@@ -1,6 +1,16 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v1.7.3] - 先选歌再操作 + aiocqhttp 直发 + Playwright 缺库自愈
+
+*   **🎯 先选歌再操作**: `#qqm歌词` / `#qqm评论` / `#qqmMV` 带关键词先出候选列表，`#qqm听N` 再执行对应动作（一次性，用完恢复播放）；不带关键词复用当前会话候选列表。
+*   **🎬 MV 命令重构**: `#qqmMV` 的 播放/下载/搜索 子命令保留（含上次播放 MV 记忆），普通关键词/空 → 先选歌；MV 分类浏览入口改为 `#qqmMV 分类 [序号/分类名]`。
+*   **📡 aiocqhttp(OneBot/napcat) 语音/文件直发**: 跨容器不共享文件系统时，语音经 ffmpeg→wav→pysilk 编成标准 silk 直发、文件以 base64 内联直发，无需共享挂载（解决 `file://` realpath ENOENT）；OneBot 下 `prepare_vocal_file` 产出的压缩 mp3 同时作为语音/文件源控制载荷。
+*   **🔧 Playwright 缺库自愈 + 阿里源**: 容器缺 Chromium 系统库（`libnspr4.so` 等）时自动把官方 apt 源切换为阿里镜像并执行 `playwright install-deps chromium`（幂等、备份 .bak、仅动官方域名）；失败日志给出可直接执行的安装命令。
+*   **🐛 修复**: `get_lyric` 传给 `build_lyric_card_data` 的参数名错误（`songName/singerName` → `song_name/singer_name`），原先执行必报 TypeError。
+*   **🏷 元数据**: `metadata.yaml` 补充 `category` 分类字段。
+
+---
 ## [v1.7.2] - Playwright 自动安装与镜像加速 + 市场 metadata 规范
 
 *   **⚡ Playwright 自动安装与镜像加速**:

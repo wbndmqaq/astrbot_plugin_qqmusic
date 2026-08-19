@@ -61,6 +61,112 @@ def _is_onebot(event) -> bool:
         return False
 
 
+def _is_aiocqhttp(event) -> bool:
+    return "aiocqhttp" in str(event.get_platform_name() or "")
+
+
+def _file_to_base64(path: str) -> str:
+    import base64
+
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
+def _bytes_to_base64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode("ascii")
+
+
+async def _aiocq_call_action(event, action: str, sid: int, segs: list) -> None:
+    """aiocqhttp 直连 OneBot call_action 发送原始消息段。
+
+    bot 实例来自 event.bot（CQHttp）；napcat 与 AstrBot 跨容器时 file:// 路径
+    不可见（realpath ENOENT），且 File/Record 组件对 base64:// 有各自的坑
+    （File 擦空不存在路径、Record 强制转 WAV），因此走底层 action 直发 base64。
+    """
+    bot = getattr(event, "bot", None)
+    if bot is None:
+        bot = getattr(getattr(event, "platform", None), "bot", None)
+    if bot is None:
+        raise RuntimeError("无法获取 aiocqhttp bot 实例")
+    is_group = action == "send_group_msg"
+    if is_group:
+        await bot.call_action(action, group_id=int(sid), message=segs)
+    else:
+        await bot.call_action(action, user_id=int(sid), message=segs)
+
+
+async def _aiocq_send_file(event, text: str, display: str, path: str) -> None:
+    """aiocqhttp 发送文件：base64 内联直发，不依赖 napcat 与 AstrBot 共享文件系统。"""
+    b64 = await asyncio.to_thread(_file_to_base64, path)
+    segs: list = []
+    if text:
+        segs.append({"type": "text", "data": {"text": text}})
+    segs.append({"type": "file", "data": {"file": f"base64://{b64}", "name": display}})
+    is_group = bool(getattr(event.message_obj, "group_id", None))
+    sid = event.message_obj.group_id if is_group else event.get_sender_id()
+    await _aiocq_call_action(event, "send_group_msg" if is_group else "send_private_msg", int(sid), segs)
+
+
+async def _aiocq_send_silk_record(event, text: str, src_path: str) -> tuple[bool, str]:
+    """aiocqhttp 语音：→24kHz 单声道 wav→pysilk 编成标准 silk，base64 直发。
+
+    Record 组件会把音频转 WAV 再 base64（载荷 ~50MB+，napcat 转码数分钟→WS 超时）；
+    silk 仅几 MB，napcat 无需转码直接上传。任何一步失败返回 (False, 原因)，由调用方
+    退回标准 Record 组件发送。OneBot/napcat 用标准 silk（#!SILK_V3），不可用
+    tencent=True（0x02 前缀是 QQ 官方专用，napcat 解析会只剩 1 秒）。
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False, "no_ffmpeg"
+    try:
+        import pysilk
+    except Exception:
+        return False, "no_pysilk"
+    import wave as _wave
+    from io import BytesIO as _BytesIO
+
+    tmp = os.path.join(os.path.dirname(src_path), f"silk_{int(time.time() * 1000)}")
+    wav_path = tmp + ".wav"
+    silk_path = tmp + ".silk"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-y", "-i", src_path, "-ar", "24000", "-ac", "1", "-f", "wav", wav_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await proc.wait()
+        if rc != 0 or not os.path.exists(wav_path):
+            return False, "ffmpeg_wav_fail"
+        with _wave.open(wav_path, "rb") as wav:
+            rate = wav.getframerate()
+            pcm = wav.readframes(wav.getnframes())
+        out = _BytesIO()
+        pysilk.encode(_BytesIO(pcm), out, rate, rate, tencent=False)
+        silk_bytes = out.getvalue()
+        segs: list = []
+        if text:
+            segs.append({"type": "text", "data": {"text": text}})
+        # silk 直接来自内存，无需先落盘再读
+        segs.append(
+            {"type": "record", "data": {"file": f"base64://{_bytes_to_base64(silk_bytes)}"}}
+        )
+        is_group = bool(getattr(event.message_obj, "group_id", None))
+        sid = event.message_obj.group_id if is_group else event.get_sender_id()
+        await _aiocq_call_action(event, "send_group_msg" if is_group else "send_private_msg", int(sid), segs)
+        return True, ""
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        for p in (wav_path, silk_path):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+
 # ──────────── QQ 官方分片文件上传（AstrBot ≥4.27.3）────────────
 
 # 对齐 AstrBot 4.27.3 `qqofficial_chunked_upload.py` 的分片阈值：
@@ -389,6 +495,7 @@ async def deliver_song(
     is_limited = (
         _is_passive_limited(event) and cfg.get("qqofficialAdapt", True) is not False
     )
+    is_aiocq = _is_aiocqhttp(event)
 
     # 受限平台无 OneBot send_api，原生/自定义音乐卡本就是 no-op，显式跳过避免误导
     allow_native = (not skip_native) and cfg.get("sendNativeCard") and not is_limited
@@ -537,11 +644,22 @@ async def deliver_song(
     if want_vocal and no_vocal:
         plugin._log_info("当前平台不支持语音，跳过语音只发文件")
     elif want_vocal:
-        try:
-            await _send_media(Record.fromFileSystem(vocal_path or local_path))
-            pending_text = ""
-        except Exception as e:
-            plugin._log_warn(f"语音发送失败{limited_tag}: {e}")
+        voice_source = vocal_path or local_path
+        silk_ok = False
+        if is_aiocq:
+            # aiocqhttp：silk 小载荷直发（napcat 免转码），失败退回标准 Record 组件
+            ok, reason = await _aiocq_send_silk_record(event, pending_text, voice_source)
+            silk_ok = ok
+            if ok:
+                pending_text = ""
+            else:
+                plugin._log_warn(f"aiocqhttp 语音 silk 直发失败（{reason}），退回 Record 组件")
+        if not silk_ok:
+            try:
+                await _send_media(Record.fromFileSystem(voice_source))
+                pending_text = ""
+            except Exception as e:
+                plugin._log_warn(f"语音发送失败{limited_tag}: {e}")
     if want_file:
         # OneBot：有压缩版优先传压缩 mp3（可靠）；其余平台 / 无压缩版保留原始文件
         # QQ 官方：大文件默认发原始文件走适配器分片上传（AstrBot ≥4.27.3，>10MB 自动分片）；
@@ -551,35 +669,49 @@ async def deliver_song(
             if "." in file_display
             else "QQ音乐_压缩版.mp3"
         )
-        is_qqofficial = _is_passive_limited(event)
-        qq_large_file = False
-        if is_qqofficial:
+        if is_aiocq:
+            # aiocqhttp：napcat 与 AstrBot 跨容器不共享文件系统，file:// 路径不可见
+            # (realpath ENOENT) → base64 内联直发；优先用压缩 mp3(vocal_path) 控制载荷
             try:
-                qq_large_file = os.path.getsize(local_path) > _QQ_CHUNKED_UPLOAD_THRESHOLD
-            except OSError:
-                qq_large_file = False
-        qq_chunk = is_qqofficial and _qq_chunked_available(cfg) and qq_large_file
-        # 走压缩 mp3 的两类情形：OneBot 群文件 / QQ 官方大文件但分片不可用
-        use_compressed = has_compressed and (
-            is_onebot
-            or (is_qqofficial and qq_large_file and not qq_chunk)
-        )
-        if use_compressed:
-            try:
-                await _send_media(File(comp_display, file=vocal_path))
+                await _aiocq_send_file(
+                    event,
+                    pending_text,
+                    comp_display if has_compressed else file_display,
+                    vocal_path or local_path,
+                )
                 pending_text = ""
             except Exception as e:
                 plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
         else:
-            if qq_chunk:
-                plugin._log_info(
-                    f"QQ官方大文件 {os.path.basename(local_path)} 走适配器分片上传"
-                )
-            try:
-                await _send_media(File(file_display, file=local_path))
-                pending_text = ""
-            except Exception as e:
-                plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
+            is_qqofficial = _is_passive_limited(event)
+            qq_large_file = False
+            if is_qqofficial:
+                try:
+                    qq_large_file = os.path.getsize(local_path) > _QQ_CHUNKED_UPLOAD_THRESHOLD
+                except OSError:
+                    qq_large_file = False
+            qq_chunk = is_qqofficial and _qq_chunked_available(cfg) and qq_large_file
+            # 走压缩 mp3 的两类情形：OneBot 群文件 / QQ 官方大文件但分片不可用
+            use_compressed = has_compressed and (
+                is_onebot
+                or (is_qqofficial and qq_large_file and not qq_chunk)
+            )
+            if use_compressed:
+                try:
+                    await _send_media(File(comp_display, file=vocal_path))
+                    pending_text = ""
+                except Exception as e:
+                    plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
+            else:
+                if qq_chunk:
+                    plugin._log_info(
+                        f"QQ官方大文件 {os.path.basename(local_path)} 走适配器分片上传"
+                    )
+                try:
+                    await _send_media(File(file_display, file=local_path))
+                    pending_text = ""
+                except Exception as e:
+                    plugin._log_warn(f"文件发送失败{limited_tag}: {e}")
     # 临时文件清理：语音已发 / 平台无语音只发文件 / 仅文件时都需调度
     # （避免 weixin_oc 等 no_vocal 平台在 want_vocal 下语音被跳过、文件又不清理导致泄漏）
     if (want_vocal and not no_vocal) or want_file:
