@@ -21,6 +21,7 @@ _CHROME_ARGS = [
 _playwright = None
 _browser = None
 _lock = asyncio.Lock()
+_runtime_checked = False
 
 
 def _switch_apt_to_aliyun():
@@ -28,11 +29,15 @@ def _switch_apt_to_aliyun():
 
     仅当存在 apt-get 且源文件指向官方域名时才改写（幂等，不覆盖用户自选镜像），
     首次改写前备份为 .bak；任何失败只记日志不影响后续。返回是否发生了改动。
+    仅在 Linux 上生效：Windows/macOS 无 `/etc/apt`，一律不触碰系统配置。
     """
 
     import glob
+    import platform
     import shutil
 
+    if platform.system() != "Linux":
+        return False
     if not shutil.which("apt-get"):
         return False
     targets = ["/etc/apt/sources.list"]
@@ -85,7 +90,15 @@ def _switch_apt_to_aliyun():
 
 
 def _install_deps_sync():
-    """在子线程中同步执行 playwright install-deps（先切阿里 apt 源再装系统运行库）。"""
+    """在子线程中同步执行 playwright install-deps（先切阿里 apt 源再装系统运行库）。
+
+    仅 Linux/容器环境需要（依赖 apt 安装系统运行库）；Windows/macOS 无安装系统包概念，直接跳过。
+    """
+    import platform
+
+    if platform.system() != "Linux":
+        logger.warning("[qqmusic] 非 Linux 环境，跳过 playwright install-deps 系统依赖安装")
+        return None
     _switch_apt_to_aliyun()
     cmd = [sys.executable, "-m", "playwright", "install-deps", "chromium"]
     logger.info(f"[qqmusic] 正在安装 Chromium 系统依赖: {' '.join(cmd)}")
@@ -94,8 +107,40 @@ def _install_deps_sync():
     return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
+def _ensure_playwright_pkg():
+    """确保 playwright Python 包已安装（缺失时自动 pip 安装，附带清华镜像源加速）。"""
+    try:
+        import importlib.util
+        if importlib.util.find_spec("playwright") is not None:
+            logger.info("[qqmusic] playwright Python 包已存在")
+            return True
+    except Exception as e:
+        logger.warning(f"[qqmusic] 检查 playwright 包失败（将尝试安装）: {e}")
+    cmd = [sys.executable, "-m", "pip", "install", "-U", "playwright"]
+    logger.info(f"[qqmusic] 正在自动安装 playwright Python 包: {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["PIP_INDEX_URL"] = os.environ.get(
+        "PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple"
+    )
+    res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if res.returncode != 0:
+        logger.error(f"[qqmusic] 自动安装 playwright 包失败: {res.stderr}")
+        return False
+    try:
+        importlib.invalidate_caches()
+        if importlib.util.find_spec("playwright") is None:
+            logger.error("[qqmusic] playwright 包安装后仍不可用")
+            return False
+    except Exception:
+        pass
+    logger.info("[qqmusic] playwright Python 包安装完成！")
+    return True
+
+
 def _install_chromium_sync():
-    """在子线程中同步执行 playwright install chromium（附带 npmmirror 加速镜像源）。"""
+    """确保 playwright Python 包已安装，并在子线程中同步执行 playwright install chromium（附带 npmmirror 加速镜像源）。"""
+    if not _ensure_playwright_pkg():
+        raise RuntimeError("playwright Python 包安装失败，请手动执行: pip install -U playwright")
     cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
     logger.info(f"[qqmusic] 正在自动安装 Playwright Chromium: {' '.join(cmd)}")
     env = os.environ.copy()
@@ -107,14 +152,43 @@ def _install_chromium_sync():
     logger.info("[qqmusic] Playwright Chromium 安装完成！")
 
 
+def _ensure_runtime_sync():
+    """跨平台确保 Playwright 渲染运行时全部就绪（幂等，首次调用执行一次）。
+
+    按顺序保证三步：
+      1. 确保 playwright Python 包已安装（缺失则 pip 装清华镜像；装不到位直接抛异常）
+      2. 仅 Linux：切阿里 apt 源并用 install-deps 安装系统运行库（失败仅告警，不阻塞）
+      3. 下载 Chromium 二进制（npmmirror 加速）
+    """
+    global _runtime_checked
+    if _runtime_checked:
+        return True
+    if not _ensure_playwright_pkg():
+        raise RuntimeError("playwright Python 包安装失败，请手动执行: pip install -U playwright")
+    _install_deps_sync()
+    _install_chromium_sync()
+    _runtime_checked = True
+    return True
+
+
+async def _ensure_runtime():
+    await asyncio.to_thread(_ensure_runtime_sync)
+
+
 async def _get_browser():
 
+    await _ensure_runtime()
     global _playwright, _browser
     if _browser is not None:
         return _browser
     async with _lock:
         if _browser is None:
-            from playwright.async_api import async_playwright
+            try:
+                from playwright.async_api import async_playwright
+            except Exception as e:
+                logger.warning(f"[qqmusic] playwright Python 包不可用（{e}），正在自动安装...")
+                await asyncio.to_thread(_install_chromium_sync)
+                from playwright.async_api import async_playwright
 
             _playwright = await async_playwright().start()
             try:
@@ -137,7 +211,7 @@ async def _get_browser():
                     # install-deps（需 apt + root），失败则给出可直接执行的安装命令。
                     logger.warning("[qqmusic] Chromium 缺少系统运行库，尝试执行 playwright install-deps 自动安装...")
                     res = await asyncio.to_thread(_install_deps_sync)
-                    if res.returncode == 0:
+                    if res is not None and res.returncode == 0:
                         logger.info("[qqmusic] playwright install-deps 完成，重新启动浏览器...")
                         _browser = await _playwright.chromium.launch(
                             headless=True,

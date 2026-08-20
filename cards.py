@@ -712,21 +712,6 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
                         "desc": "探测 API 是否可用",
                         "example": "#qqm 测试",
                     },
-                    {
-                        "name": "插件更新",
-                        "desc": "git 拉取最新代码",
-                        "example": "#qqm更新",
-                    },
-                    {
-                        "name": "强制更新",
-                        "desc": "丢弃本地改动同步远程",
-                        "example": "#qqm强制更新",
-                    },
-                    {
-                        "name": "更新日志",
-                        "desc": "查看最近提交",
-                        "example": "#qqm更新日志",
-                    },
                 ],
             },
             {

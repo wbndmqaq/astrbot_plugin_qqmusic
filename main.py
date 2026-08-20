@@ -40,6 +40,20 @@ _SKIP_ALL = {
 _SKIP_TEXT = {"skipTextInfo": True}
 
 
+def _get_local_version(plugin_dir: str) -> str:
+    """从 metadata.yaml 读取插件版本号（用于帮助卡片/配置面板展示）。"""
+    try:
+        import yaml
+
+        with open(
+            os.path.join(plugin_dir, "metadata.yaml"), "r", encoding="utf-8"
+        ) as f:
+            meta = yaml.safe_load(f) or {}
+        return str(meta.get("version", "?")).lstrip("v")
+    except Exception:
+        return "?"
+
+
 def _safe_int(v, default: int = 0) -> int:
     try:
         return int(v)
@@ -794,9 +808,7 @@ class QQMusicPlugin(Star):
 
         cfg = self._cfg()
         try:
-            from .updater import get_local_version
-
-            version = get_local_version(PLUGIN_DIR)
+            version = _get_local_version(PLUGIN_DIR)
             data = cardlib.build_help_card_data(cfg=self._cfg(), version=version)
             url = await self._render_card(event, data, "qqmusic-help")
             if url:
@@ -3247,9 +3259,7 @@ class QQMusicPlugin(Star):
             pass
         adapter_line = f"adapter: {self._platform_name(event)}"
         try:
-            from .updater import get_local_version
-
-            version_line = f"version: v{get_local_version(PLUGIN_DIR)}"
+            version_line = f"version: v{_get_local_version(PLUGIN_DIR)}"
         except Exception:
             version_line = ""
         await self._reply(
@@ -3538,61 +3548,6 @@ class QQMusicPlugin(Star):
             await self._reply(event, f"已登录账号 {len(lst)} 个：\n" + "\n".join(lines))
         except Exception as err:
             await self._reply(event, f"查询失败：{err}")
-        event.stop_event()
-
-    # ──────────── 更新（git） ────────────
-
-    @filter.regex(re.compile(r"^#?(qqm更新|qq音乐更新)$", re.IGNORECASE), priority=6)
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def update(self, event: AstrMessageEvent):
-        """#qqm更新 拉取最新插件代码（主人）"""
-
-
-        from .updater import get_local_version, update_plugin
-
-        await self._reply(
-            event, f"开始更新 qqmusic-plugin（v{get_local_version(PLUGIN_DIR)}）…"
-        )
-        ret = await update_plugin(PLUGIN_DIR, force=False)
-        await self._reply(
-            event, ret.get("message") or ("更新完成" if ret.get("ok") else "更新失败")
-        )
-        event.stop_event()
-
-    @filter.regex(
-        re.compile(r"^#?(qqm强制更新|qq音乐强制更新)$", re.IGNORECASE), priority=6
-    )
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def force_update(self, event: AstrMessageEvent):
-        """#qqm强制更新 丢弃本地改动并同步远程（主人）"""
-
-
-        from .updater import get_local_version, update_plugin
-
-        await self._reply(
-            event,
-            f"开始强制更新 qqmusic-plugin（v{get_local_version(PLUGIN_DIR)}）…\n"
-            "将丢弃插件目录内未提交的本地修改",
-        )
-        ret = await update_plugin(PLUGIN_DIR, force=True)
-        await self._reply(
-            event,
-            ret.get("message") or ("强制更新完成" if ret.get("ok") else "强制更新失败"),
-        )
-        event.stop_event()
-
-    @filter.regex(
-        re.compile(r"^#?(qqm更新日志|qq音乐更新日志)$", re.IGNORECASE), priority=6
-    )
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def update_log(self, event: AstrMessageEvent):
-        """#qqm更新日志 查看最近提交（主人）"""
-
-
-        from .updater import get_update_log
-
-        ret = await get_update_log(PLUGIN_DIR, limit=15)
-        await self._reply(event, ret.get("message") or "暂无更新日志")
         event.stop_event()
 
     async def terminate(self):

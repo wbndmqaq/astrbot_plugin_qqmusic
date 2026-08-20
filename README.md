@@ -44,9 +44,6 @@
 | ⚙️ 配置 | `#qqm 开启/关闭 点歌/解析` | 功能开关（主人） |
 | ⚙️ 配置 | `#qqm 测试` | 测试 API 连通（主人） |
 | ⚙️ 配置 | `#qqm 账号` | 已登录账号列表（主人） |
-| 🔄 更新 | `#qqm更新` | 拉取最新插件代码（主人） |
-| 🔄 更新 | `#qqm强制更新` | 丢弃本地改动并同步远程（主人） |
-| 🔄 更新 | `#qqm更新日志` | 查看最近提交（主人） |
 
 ### 音质选项
 
@@ -138,7 +135,6 @@ astrbot_plugin_qqmusic/
 ├── cards.py             # 会话存储、隐私脱敏、卡片数据、文本兜底
 ├── render.py            # 本地 Playwright 渲染（模板 → PNG）
 ├── tpl_adapter.py       # art-template → Jinja2 模板适配
-├── updater.py           # git 自更新
 ├── _conf_schema.json    # 配置 Schema（管理面板）
 ├── metadata.yaml        # 插件元数据
 └── resources/

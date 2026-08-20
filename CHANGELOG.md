@@ -1,6 +1,14 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v1.7.4] - 渲染独立化 + 跨平台 Playwright 运行时就绪
+
+*   **🖥 渲染模块独立 `render.py`**: 复刻 kugou/netease 风格，渲染逻辑收敛进独立 `render.py`，`main.py` 仅负责调用与落盘。
+*   **📦 跨平台 Playwright 三步运行时就绪**: 渲染前主动按序完成——① 确保 playwright Python 包（缺失自动 pip 装清华镜像，装不到位终止）→ ② 仅 Linux：切阿里 apt 源并 `playwright install-deps` 装系统运行库 → ③ 下载 Chromium 二进制（npmmirror 加速）。幂等，首次执行一次后跳过。
+*   **🔒 Linux 识别**: apt 换源 / install-deps 仅在 `platform.system()=="Linux"` 时执行，Windows/macOS 一律跳过，不触碰系统配置。
+*   **🗑 移除 `updater.py`（git 自更新）**: 删除 `#qqm更新` / `#qqm强制更新` / `#qqm更新日志` 三个命令，插件不再内置 git 拉取/更新日志功能；`get_local_version` 内联进 `main.py`，帮助卡片与配置面板版本显示保持正常。手动更新请 `git pull` 或重装插件。
+
+---
 ## [v1.7.3] - 先选歌再操作 + aiocqhttp 直发 + Playwright 缺库自愈
 
 *   **🎯 先选歌再操作**: `#qqm歌词` / `#qqm评论` / `#qqmMV` 带关键词先出候选列表，`#qqm听N` 再执行对应动作（一次性，用完恢复播放）；不带关键词复用当前会话候选列表。
