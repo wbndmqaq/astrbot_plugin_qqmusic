@@ -72,12 +72,6 @@ def _file_to_base64(path: str) -> str:
         return base64.b64encode(f.read()).decode("ascii")
 
 
-def _bytes_to_base64(data: bytes) -> str:
-    import base64
-
-    return base64.b64encode(data).decode("ascii")
-
-
 async def _aiocq_call_action(event, action: str, sid: int, segs: list) -> None:
     """aiocqhttp 直连 OneBot call_action 发送原始消息段。
 
@@ -109,62 +103,29 @@ async def _aiocq_send_file(event, text: str, display: str, path: str) -> None:
     await _aiocq_call_action(event, "send_group_msg" if is_group else "send_private_msg", int(sid), segs)
 
 
-async def _aiocq_send_silk_record(event, text: str, src_path: str) -> tuple[bool, str]:
-    """aiocqhttp 语音：→24kHz 单声道 wav→pysilk 编成标准 silk，base64 直发。
+async def _aiocq_send_record(event, text: str, src_path: str) -> tuple[bool, str]:
+    """aiocqhttp 语音：紧凑 mp3 以 base64:// record 段直发（OneBot v11 标准段）。
 
-    Record 组件会把音频转 WAV 再 base64（载荷 ~50MB+，napcat 转码数分钟→WS 超时）；
-    silk 仅几 MB，napcat 无需转码直接上传。任何一步失败返回 (False, 原因)，由调用方
-    退回标准 Record 组件发送。OneBot/napcat 用标准 silk（#!SILK_V3），不可用
-    tencent=True（0x02 前缀是 QQ 官方专用，napcat 解析会只剩 1 秒）。
+    不再插件侧预编码 silk：协议端（NapCat / SnowLuma 等按 OneBot v11 实现的 NTQQ 框架）
+    对 record 段统一「非 silk → 自带 ffmpeg addon 转 Tencent silk（\\x02#!SILK_V3、
+    24kHz 单声道），时长用 ffmpeg 对原始文件精确探测」。此前插件自编的裸 silk 会被
+    协议端按魔数透传——非标码流导致手机无法播放、时长探测失败钳到 1 秒。
+    走 base64 直发而非 Record 组件，是为了绕开 AstrBot 把语音强制转 WAV 再编码
+    （载荷 ~50MB+ → WS 超时）。任何一步失败返回 (False, 原因)，由调用方退回
+    标准 Record 组件发送。
     """
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return False, "no_ffmpeg"
     try:
-        import pysilk
-    except Exception:
-        return False, "no_pysilk"
-    import wave as _wave
-    from io import BytesIO as _BytesIO
-
-    tmp = os.path.join(os.path.dirname(src_path), f"silk_{int(time.time() * 1000)}")
-    wav_path = tmp + ".wav"
-    silk_path = tmp + ".silk"
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            ffmpeg, "-y", "-i", src_path, "-ar", "24000", "-ac", "1", "-f", "wav", wav_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        rc = await proc.wait()
-        if rc != 0 or not os.path.exists(wav_path):
-            return False, "ffmpeg_wav_fail"
-        with _wave.open(wav_path, "rb") as wav:
-            rate = wav.getframerate()
-            pcm = wav.readframes(wav.getnframes())
-        out = _BytesIO()
-        pysilk.encode(_BytesIO(pcm), out, rate, rate, tencent=False)
-        silk_bytes = out.getvalue()
+        b64 = await asyncio.to_thread(_file_to_base64, src_path)
         segs: list = []
         if text:
             segs.append({"type": "text", "data": {"text": text}})
-        # silk 直接来自内存，无需先落盘再读
-        segs.append(
-            {"type": "record", "data": {"file": f"base64://{_bytes_to_base64(silk_bytes)}"}}
-        )
+        segs.append({"type": "record", "data": {"file": f"base64://{b64}"}})
         is_group = bool(getattr(event.message_obj, "group_id", None))
         sid = event.message_obj.group_id if is_group else event.get_sender_id()
         await _aiocq_call_action(event, "send_group_msg" if is_group else "send_private_msg", int(sid), segs)
         return True, ""
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
-    finally:
-        for p in (wav_path, silk_path):
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
 
 
 # ──────────── QQ 官方分片文件上传（AstrBot ≥4.27.3）────────────
@@ -645,16 +606,16 @@ async def deliver_song(
         plugin._log_info("当前平台不支持语音，跳过语音只发文件")
     elif want_vocal:
         voice_source = vocal_path or local_path
-        silk_ok = False
+        record_ok = False
         if is_aiocq:
-            # aiocqhttp：silk 小载荷直发（napcat 免转码），失败退回标准 Record 组件
-            ok, reason = await _aiocq_send_silk_record(event, pending_text, voice_source)
-            silk_ok = ok
+            # aiocqhttp：紧凑音频 base64 直发，协议端自行转标准 Tencent silk（时长/兼容性正确）
+            ok, reason = await _aiocq_send_record(event, pending_text, voice_source)
+            record_ok = ok
             if ok:
                 pending_text = ""
             else:
-                plugin._log_warn(f"aiocqhttp 语音 silk 直发失败（{reason}），退回 Record 组件")
-        if not silk_ok:
+                plugin._log_warn(f"aiocqhttp 语音直发失败（{reason}），退回 Record 组件")
+        if not record_ok:
             try:
                 await _send_media(Record.fromFileSystem(voice_source))
                 pending_text = ""

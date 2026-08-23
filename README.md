@@ -93,14 +93,66 @@ bug反馈QQ群：[点击加入](https://qm.qq.com/q/8sOZdZTnaw)
 
 ## 卡片渲染
 
-自 v1.5.0 起卡片渲染改为**本地 Playwright**。首次使用需安装浏览器内核：
+自 v1.5.0 起卡片渲染改为**本地 Playwright** 截图。
+
+> 出于安全考虑，插件**绝不会**自动执行任何系统级安装——不修改 apt 源、不运行 apt-get、不自动 pip 装包、不自动下载浏览器内核。需要图片卡片时请按下面步骤手动安装（约 1~2 分钟）。
+
+### ① 安装 playwright Python 包
 
 ```bash
 pip install playwright
+# 国内网络可用清华镜像：
+pip install playwright -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+### ② 下载 Chromium 浏览器内核
+
+```bash
+python -m playwright install chromium
+# 国内网络可用 npmmirror 加速：
+PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ python -m playwright install chromium
+```
+
+Windows PowerShell 写法：
+
+```powershell
+$env:PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright/"
 python -m playwright install chromium
 ```
 
-渲染失败时会自动回退为纯文本展示，不影响点歌/解析功能。
+### ③（仅 Linux / Docker 容器）安装系统运行库
+
+仅当启动渲染时报 `libnspr4` / `libnss3` / `error while loading shared libraries` 才需要，需 root：
+
+```bash
+python -m playwright install-deps chromium
+```
+
+或手动安装系统库：
+
+```bash
+apt-get update && apt-get install -y \
+  libnspr4 libnss3 libgbm1 libasound2 \
+  libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 libdrm2 \
+  libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxfixes3 \
+  libxkbcommon0 libxrandr2 libxext6 libpango-1.0-0
+```
+
+容器内 apt 官方源下载慢？可选换阿里镜像源后再装：
+
+```bash
+# Debian 12 (bookworm)
+sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+# Ubuntu 22.04
+sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
+apt-get update
+```
+
+### ④ 重载插件
+
+WebUI → 插件管理 → 本插件 → 重载。
+
+环境未就绪时，日志会输出一次上述完整教程，所有指令自动回退纯文本展示，不影响点歌/解析/播放功能；安装完成后重载即可正常出图。
 
 ## 平台适配
 

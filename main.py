@@ -39,6 +39,9 @@ _SKIP_ALL = {
 # 仅跳过文本信息（详情卡已含歌名/歌手/音质），原生/自定义音乐卡按配置发送
 _SKIP_TEXT = {"skipTextInfo": True}
 
+# #qqm听所有 连播上限（防止误触发刷屏/大量下载）
+_PLAY_ALL_LIMIT = 30
+
 
 def _get_local_version(plugin_dir: str) -> str:
     """从 metadata.yaml 读取插件版本号（用于帮助卡片/配置面板展示）。"""
@@ -160,6 +163,12 @@ def _collect_message_text(event: AstrMessageEvent) -> str:
                     parts.append(str(t))
             elif seg_type in ("Image", "File", "Record", "Video", "Face"):
                 continue
+            elif seg_type == "Json":
+                # OneBot json 段（音乐分享卡片）：适配器不写入 message_str，
+                # 必须从组件 data 里取 ark JSON，否则群里的分享卡永远解析不到
+                d = getattr(seg, "data", None)
+                if d:
+                    parts.append(str(d))
             else:
                 # 其它组件（含可能的 JSON/分享）序列化
                 with contextlib.suppress(Exception):
@@ -511,6 +520,33 @@ class QQMusicPlugin(Star):
             await self._reply(event, "该会话是榜单分类，请先 #qqm排行 榜单名 查看歌曲")
             event.stop_event()
             return
+        if stype == "albumList":
+            # 专辑候选会话：展开所选专辑的曲目（再回复 #qqm听N 播放）
+            albums = session.get("data") or []
+            if n < 1 or n > len(albums):
+                await self._reply(event, f"请选择 1-{len(albums)}")
+                event.stop_event()
+                return
+            alb = albums[n - 1]
+            try:
+                result = await qqapi.album_songs(
+                    alb["albummid"], user_key=self._user_key(event)
+                )
+            except Exception as err:  # noqa: BLE001
+                self._log_warn(f"专辑展开失败: {err}")
+                await self._reply(event, f"专辑展开失败：{err}")
+                event.stop_event()
+                return
+            tracks = result.get("list") or []
+            if not tracks:
+                await self._reply(event, "该专辑暂无曲目")
+                event.stop_event()
+                return
+            await self._show_album_tracks(
+                event, alb, tracks, scope, cfg
+            )
+            event.stop_event()
+            return
         if stype == "recommend":
             # 推荐歌单会话：展开所选歌单（原「#qqm推荐听序号」提示是死指令）
             await self._expand_recommend(event, session, n)
@@ -569,6 +605,67 @@ class QQMusicPlugin(Star):
             plugin_dir=PLUGIN_DIR,
             options=_SKIP_TEXT,
         )
+        event.stop_event()
+
+    @filter.regex(r"^#?(?:qq|QQ)m\s*听\s*所有$|^#听\s*所有$")
+    async def play_all(self, event: AstrMessageEvent):
+        """#qqm听所有：依次发送当前会话列表的全部歌曲（语音+文件，上限 30 首）"""
+
+        cfg = self._cfg()
+        if not cfg.get("enable", True) or cfg.get("enableSongRequest") is False:
+            return
+        if not re.match(
+            r"^#?(?:qq|QQ)m\s*听\s*所有$|^#\s*听\s*所有$",
+            event.message_str.strip(),
+            re.IGNORECASE,
+        ):
+            return
+        scope = self._scope(event)
+        session = await cardlib.SessionStore.get(self, scope)
+        if not session or not session.get("data"):
+            # 无本插件会话时不抢其它插件的 #听所有
+            return
+        stype = session.get("type") or "pick"
+        # 候选/分类类会话（MV 列表、榜单分类、专辑候选、推荐歌单候选）不是歌曲列表
+        if stype in ("mvList", "topCategory", "albumList", "recommend"):
+            return
+        songs = session.get("data") or []
+        batch = songs[:_PLAY_ALL_LIMIT]
+        title = session.get("keyword") or "当前列表"
+        await self._reply(
+            event,
+            f"▶ 开始连播「{title}」共 {len(batch)} 首"
+            + (f"（列表共 {len(songs)} 首，仅连播前 {_PLAY_ALL_LIMIT} 首）" if len(songs) > len(batch) else "")
+            + "，逐首下载发送需要一些时间…",
+        )
+        ok = fail = 0
+        user_key = self._user_key(event)
+        for i, song in enumerate(batch):
+            try:
+                play = await self._resolve_play(song, cfg, user_key)
+                if not play.get("url"):
+                    fail += 1
+                    self._log_warn(
+                        f"连播 {i + 1}/{len(batch)} 无播放链: {song.get('songName')}"
+                    )
+                    continue
+                # 连播不发详情卡/文案/音乐卡，只发语音+文件
+                await deliver_song(
+                    self,
+                    event,
+                    song,
+                    play,
+                    cfg=cfg,
+                    plugin_dir=PLUGIN_DIR,
+                    options=_SKIP_ALL,
+                )
+                ok += 1
+            except Exception as err:  # noqa: BLE001  # 单曲失败不中断连播
+                fail += 1
+                self._log_warn(f"连播 {i + 1}/{len(batch)} 失败: {err}")
+            if i < len(batch) - 1:
+                await asyncio.sleep(1)
+        await self._reply(event, f"连播完成：成功 {ok} 首，失败 {fail} 首")
         event.stop_event()
 
     async def _expand_recommend(self, event: AstrMessageEvent, session: dict, n: int):
@@ -737,7 +834,7 @@ class QQMusicPlugin(Star):
         event.stop_event()
 
     async def _show_lyric(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
-        """显示所选歌曲的歌词（#qqm听N 触发）。"""
+        """显示所选歌曲的歌词（#qqm听N 触发）。超过 36 行自动分页成多张卡片。"""
         songmid = song.get("songmid") or song.get("songMid") or ""
         if not songmid:
             await self._reply(event, "该歌曲缺少 songmid，无法获取歌词")
@@ -754,27 +851,33 @@ class QQMusicPlugin(Star):
             for ln in text.split("\n")
             if ln.strip()
         ]
-        lines = [ln for ln in lines if ln][:40]
+        lines = [ln for ln in lines if ln]
         if not lines:
             await self._reply(event, "暂无歌词")
             return
-        song_name = song.get("songName") or ""
-        singer_name = song.get("singerName") or ""
-        card = cardlib.build_lyric_card_data(
-            song_name=song_name,
-            singer_name=singer_name,
-            cover=song.get("cover") or "",
-            album_name=song.get("albumName") or "",
-            songmid=songmid,
-            lines=lines,
-            cfg=self._cfg(),
-        )
-        await self._reply_card_or_text(
-            event,
-            tpl_name="qqmusic-lyric",
-            data=card,
-            format_text=cardlib.format_lyric_text,
-        )
+        # 分页完整展示（此前只显示前 36 行）
+        pages = [lines[i : i + 36] for i in range(0, len(lines), 36)]
+        total = len(lines)
+        for pi, page_lines in enumerate(pages):
+            card = cardlib.build_lyric_card_data(
+                song_name=song.get("songName") or "",
+                singer_name=song.get("singerName") or "",
+                cover=song.get("cover") or "",
+                album_name=song.get("albumName") or "",
+                songmid=songmid,
+                lines=page_lines,
+                cfg=self._cfg(),
+            )
+            if len(pages) > 1:
+                card["tip"] = f"第 {pi + 1}/{len(pages)} 页 · 共 {total} 行"
+            ok = await self._reply_card_or_text(
+                event,
+                tpl_name="qqmusic-lyric",
+                data=card,
+                format_text=cardlib.format_lyric_text,
+            )
+            if not ok:
+                break
 
     @filter.regex(r"^#?(qq|QQ)m\s*热搜$")
     async def hot_search(self, event: AstrMessageEvent):
@@ -1088,6 +1191,17 @@ class QQMusicPlugin(Star):
                         "data": lst,
                     },
                 )
+                if cfg.get("renderListCard", True):
+                    data = cardlib.build_mv_list_card_data(f"MV · {arg_text}", lst, cfg=cfg)
+                    if await self._reply_card_or_text(
+                        event,
+                        tpl_name="qqmusic-list",
+                        data=data,
+                        format_text=lambda d: cardlib.format_mv_list_text(lst)
+                        + "\n\n发 #qqmMV 播放 / 下载 序号",
+                    ):
+                        event.stop_event()
+                        return
                 await self._reply(
                     event,
                     cardlib.format_mv_list_text(lst)
@@ -1224,9 +1338,25 @@ class QQMusicPlugin(Star):
                         "data": lst,
                     },
                 )
+                shown = lst[:15]
+                if cfg.get("renderListCard", True):
+                    data = cardlib.build_mv_list_card_data(
+                        f"MV 分类 · {tag.get('name') or tag.get('title') or ''}",
+                        shown,
+                        cfg=cfg,
+                    )
+                    if await self._reply_card_or_text(
+                        event,
+                        tpl_name="qqmusic-list",
+                        data=data,
+                        format_text=lambda d: cardlib.format_mv_list_text(shown)
+                        + "\n\n发 #qqmMV 播放 / 下载 序号",
+                    ):
+                        event.stop_event()
+                        return
                 await self._reply(
                     event,
-                    cardlib.format_mv_list_text(lst[:15])
+                    cardlib.format_mv_list_text(shown)
                     + "\n\n发 #qqmMV 播放 / 下载 序号",
                 )
             except Exception as err:
@@ -1313,7 +1443,8 @@ class QQMusicPlugin(Star):
             if sent_file:
                 await self._reply(event, "视频消息发送失败，已改发下载文件")
             else:
-                await self._reply(event, f"视频发送失败，可点击查看：{url}")
+                # 按反馈去掉「视频发送失败」措辞：链接本身可播放/下载，属于正常兜底
+                await self._reply(event, f"已改为链接发送（可在线播放/下载）：{url}")
         return True
 
     async def _show_mv(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
@@ -1456,6 +1587,20 @@ class QQMusicPlugin(Star):
                     "data": songs,
                 },
             )
+            if cfg.get("renderListCard", True):
+                data = cardlib.build_list_card_data(
+                    "个性电台",
+                    songs,
+                    cfg=cfg,
+                )
+                if await self._reply_card_or_text(
+                    event,
+                    tpl_name="qqmusic-list",
+                    data=data,
+                    format_text=lambda d: cardlib.format_song_list(songs, "个性电台"),
+                ):
+                    event.stop_event()
+                    return
             await self._reply(event, cardlib.format_song_list(songs, "个性电台"))
         except Exception as err:
             self._log_warn(f"电台失败: {err}")
@@ -1531,7 +1676,8 @@ class QQMusicPlugin(Star):
         user_key = self._user_key(event)
         try:
             await self._reply(event, "正在获取收藏...")
-            res = await qqapi.user_favorites(song_num=30, user_key=user_key)
+            # 请求 100 首（此前只取 30）；接口不支持时 api 层自动降级 30
+            res = await qqapi.user_favorites(song_num=100, user_key=user_key)
             songs = res.get("songs") or []
             if not songs:
                 await self._reply(
@@ -1664,8 +1810,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*专辑\s+(.+)$")
     async def album(self, event: AstrMessageEvent):
-        """#qqm专辑 关键词 搜索专辑，展示曲目列表"""
-
+        """#qqm专辑 关键词 搜索专辑出候选列表，回复 #qqm听N 查看曲目"""
 
         cfg = self._cfg()
         if not cfg.get("enable", True):
@@ -1680,53 +1825,112 @@ class QQMusicPlugin(Star):
         user_key = self._user_key(event)
         try:
             await self._reply(event, f"正在搜索专辑：{keyword}")
-            albums = await qqapi.search_albums(keyword, page_size=5, user_key=user_key)
+            albums = await qqapi.search_albums(keyword, page_size=10, user_key=user_key)
             if not albums:
                 await self._reply(event, "没有找到相关专辑")
                 event.stop_event()
                 return
-            alb = albums[0]
-            result = await qqapi.album_songs(alb["albummid"], user_key=user_key)
-            if not result.get("list"):
-                await self._reply(event, "该专辑暂无曲目")
-                event.stop_event()
-                return
-            title = f"{alb.get('singerName', '')} - {alb.get('albumName', '')}"
+            if len(albums) == 1:
+                alb = albums[0]
+                result = await qqapi.album_songs(alb["albummid"], user_key=user_key)
+                if result.get("list"):
+                    await self._show_album_tracks(event, alb, result["list"], scope, cfg)
+                    event.stop_event()
+                    return
+            # 多候选 / 首选无曲目：给候选列表让用户选，避免同名/新专辑自动选错
+            view = [self._album_list_item(a) for a in albums]
             await cardlib.SessionStore.set(
                 self,
                 scope,
-                {
-                    "type": "album",
-                    "data": result["list"],
-                    "album": alb,
-                },
+                {"type": "albumList", "keyword": f"专辑 · {keyword}", "data": albums},
             )
+            tip = "查看该专辑的曲目列表"
             if cfg.get("renderListCard", True):
                 data = cardlib.build_list_card_data(
-                    title,
-                    result["list"],
-                    {"tip": f"发送 #qqm听序号 播放「{alb.get('albumName', '')}」"},
+                    f"专辑 · {keyword}",
+                    view,
+                    options={
+                        "tip": tip,
+                        "commands": [
+                            {
+                                "name": "#qqm听序号",
+                                "desc": "展开该专辑曲目，随后可再选歌播放",
+                                "example": "#qqm听1",
+                            },
+                            {
+                                "name": "列表有效期",
+                                "desc": "本列表约 10 分钟内有效，过期请重新搜索",
+                                "example": "#qqm专辑 关键词",
+                            },
+                        ],
+                    },
                     cfg=self._cfg(),
                 )
                 if await self._reply_card_or_text(
                     event,
                     tpl_name="qqmusic-list",
                     data=data,
-                    format_text=lambda d: cardlib.format_song_list(
-                        result["list"], title
-                    ),
+                    format_text=lambda d: cardlib.format_song_list(view, f"专辑 · {keyword}")
+                    + f"\n\n回复 #qqm听序号 {tip}",
                 ):
-                    if alb.get("publicTime"):
-                        await self._reply(event, f"发行时间：{alb['publicTime']}")
                     event.stop_event()
                     return
-            await self._reply(event, cardlib.format_song_list(result["list"], title))
-            if alb.get("publicTime"):
-                await self._reply(event, f"发行时间：{alb['publicTime']}")
+            await self._reply(
+                event,
+                cardlib.format_song_list(view, f"专辑 · {keyword}")
+                + f"\n\n回复 #qqm听序号 {tip}",
+            )
         except Exception as err:
             self._log_warn(f"专辑搜索失败: {err}")
             await self._reply(event, "专辑搜索失败，请稍后重试")
         event.stop_event()
+
+    @staticmethod
+    def _album_list_item(alb: dict) -> dict:
+        """专辑条目 → 列表卡片视图（歌名位放专辑名，时长位放发行时间）。"""
+        return {
+            "songName": alb.get("albumName") or "未知专辑",
+            "singerName": alb.get("singerName") or "",
+            "albumName": str(alb.get("songCount") or "") + "首"
+            if alb.get("songCount")
+            else "",
+            "cover": alb.get("cover") or "",
+            "duration": alb.get("publicTime") or "",
+            "payplay": False,
+            "mvVid": "",
+        }
+
+    async def _show_album_tracks(
+        self, event: AstrMessageEvent, alb: dict, tracks: list, scope: str, cfg: dict
+    ) -> None:
+        title = f"{alb.get('singerName', '')} - {alb.get('albumName', '')}"
+        await cardlib.SessionStore.set(
+            self,
+            scope,
+            {"type": "album", "data": tracks, "album": alb},
+        )
+        if cfg.get("renderListCard", True):
+            data = cardlib.build_list_card_data(
+                title,
+                tracks,
+                {
+                    "tip": f"发送 #qqm听序号 播放「{alb.get('albumName', '')}」，"
+                    "#qqm听所有 连播整张专辑"
+                },
+                cfg=self._cfg(),
+            )
+            if await self._reply_card_or_text(
+                event,
+                tpl_name="qqmusic-list",
+                data=data,
+                format_text=lambda d: cardlib.format_song_list(tracks, title),
+            ):
+                if alb.get("publicTime"):
+                    await self._reply(event, f"发行时间：{alb['publicTime']}")
+                return
+        await self._reply(event, cardlib.format_song_list(tracks, title))
+        if alb.get("publicTime"):
+            await self._reply(event, f"发行时间：{alb['publicTime']}")
 
     @filter.regex(r"^#?(qq|QQ)m\s*歌单\s+(.+)$")
     async def playlist(self, event: AstrMessageEvent):
@@ -1890,21 +2094,27 @@ class QQMusicPlugin(Star):
 
     # ══════════════════ 智能解析 ══════════════════
 
-    @filter.regex(
-        r"(y\.qq\.com|c6\.y\.qq\.com|i\.y\.qq\.com|qqmusic|QQ音乐|100497308|music\.lua|structmsg|songmid|sdkshare_music)",
-        priority=8,  # 高优先级抢先解析，避免与其他插件重复处理（对齐原版 accept 抢占）
-    )
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=8)
     async def resolve(self, event: AstrMessageEvent):
-        """自动解析 QQ 音乐分享卡片 / 链接"""
+        """自动解析 QQ 音乐分享卡片 / 链接。
 
-
+        用全量事件而非 @filter.regex：OneBot json 段（分享卡片）不会写入
+        message_str，regex 过滤器永远匹配不到 → 群里发卡片无反应。
+        高优先级抢先解析，避免与其他插件重复处理（对齐原版 accept 抢占）。
+        """
         cfg = self._cfg()
         if not cfg.get("enable", True) or cfg.get("enableResolve") is False:
+            return
+        # 快速预筛：纯文本先看 message_str，仅当含 Json 组件（分享卡片）才展开全文
+        msg_str = str(event.message_str or "")
+        chain = getattr(getattr(event, "message_obj", None), "message", None) or []
+        has_json = any(type(seg).__name__ == "Json" for seg in chain)
+        if not has_json and not _is_qqmusic_message(msg_str):
             return
         text = _collect_message_text(event)
         if not _is_qqmusic_message(text):
             return
-        if _is_plugin_command_msg(event.message_str):
+        if _is_plugin_command_msg(msg_str):
             return
         try:
             ok = await self._handle_resolve(event, text, cfg)

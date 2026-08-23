@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
-import subprocess
-import sys
 
 from astrbot.api import logger
 
@@ -21,223 +18,92 @@ _CHROME_ARGS = [
 _playwright = None
 _browser = None
 _lock = asyncio.Lock()
-_runtime_checked = False
+
+# 渲染环境缺失的完整安装指引只输出一次，避免每次渲染刷屏
+_hint_logged = False
+
+# 手动安装教程（与 README「卡片渲染」章节保持一致）
+_RENDER_TUTORIAL = (
+    "本插件绝不自动执行任何系统级安装（不改 apt 源 / 不跑 apt-get / 不自动 pip 装包 /\n"
+    "不自动下载内核），请按以下步骤手动操作：\n"
+    "\n"
+    "① 安装 playwright Python 包：\n"
+    "     pip install playwright\n"
+    "     # 国内镜像：pip install playwright -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+    "\n"
+    "② 下载 Chromium 浏览器内核：\n"
+    "     python -m playwright install chromium\n"
+    "     # 国内加速：PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ \\\n"
+    "     #           python -m playwright install chromium\n"
+    "\n"
+    "③ 仅 Linux 容器且报 libnspr4/libnss3/shared libraries 缺失时（需 root）：\n"
+    "     python -m playwright install-deps chromium\n"
+    "     # 或手动装库：apt-get update && apt-get install -y libnspr4 libnss3 libgbm1\n"
+    "     #   libasound2 libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 libdrm2 \\\n"
+    "     #   libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 \\\n"
+    "     #   libxrandr2 libxext6 libpango-1.0-0\n"
+    "     # 容器内 apt 下载慢可先换阿里源（Debian 12 示例）：\n"
+    "     #   sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources\n"
+    "\n"
+    "完成后重载本插件即可渲染图片；未安装期间所有指令自动回退纯文本，点歌播放不受影响。\n"
+    "更多说明见 README「卡片渲染」章节。"
+)
 
 
-def _switch_apt_to_aliyun():
-    """Debian/Ubuntu 容器下把官方 apt 源换成阿里镜像，加速 install-deps 下载。
+def _log_env_hint(reason: str) -> None:
+    """卡片渲染不可用时在日志输出完整的手动安装教程。
 
-    仅当存在 apt-get 且源文件指向官方域名时才改写（幂等，不覆盖用户自选镜像），
-    首次改写前备份为 .bak；任何失败只记日志不影响后续。返回是否发生了改动。
-    仅在 Linux 上生效：Windows/macOS 无 `/etc/apt`，一律不触碰系统配置。
+    安全约束：插件绝不自动执行 pip/apt/Chromium 下载等系统级安装，
+    仅记录指引交由用户确认后自行操作。
     """
-
-    import glob
-    import platform
-    import shutil
-
-    if platform.system() != "Linux":
-        return False
-    if not shutil.which("apt-get"):
-        return False
-    targets = ["/etc/apt/sources.list"]
-    targets += glob.glob("/etc/apt/sources.list.d/*.sources")
-    mapping = [
-        ("http://deb.debian.org/debian", "http://mirrors.aliyun.com/debian"),
-        ("https://deb.debian.org/debian", "http://mirrors.aliyun.com/debian"),
-        ("http://security.debian.org/debian-security", "http://mirrors.aliyun.com/debian-security"),
-        ("https://security.debian.org/debian-security", "http://mirrors.aliyun.com/debian-security"),
-        ("http://archive.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
-        ("https://archive.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
-        ("http://security.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
-        ("https://security.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
-    ]
-    changed = False
-    for path in targets:
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except Exception:
-            content = None
-        if content is None:
-            continue
-        new_content = content
-        for old, new in mapping:
-            if old in new_content:
-                new_content = new_content.replace(old, new)
-        if new_content == content:
-            continue
-        bak = path + ".bak"
-        try:
-            if not os.path.exists(bak):
-                with open(bak, "w", encoding="utf-8") as f:
-                    f.write(content)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(new_content)
-        except Exception as e:
-            logger.warning(f"[qqmusic] apt 源改写失败 {path}: {e}")
-            continue
-        changed = True
-        logger.info(f"[qqmusic] apt 源 {path} 已切换阿里镜像（原文件备份为 {bak}）")
-    if changed:
-        try:
-            subprocess.run(["apt-get", "update"], capture_output=True, text=True, check=False, timeout=300)
-        except Exception as e:
-            logger.warning(f"[qqmusic] apt-get update 失败: {e}")
-    return changed
-
-
-def _install_deps_sync():
-    """在子线程中同步执行 playwright install-deps（先切阿里 apt 源再装系统运行库）。
-
-    仅 Linux/容器环境需要（依赖 apt 安装系统运行库）；Windows/macOS 无安装系统包概念，直接跳过。
-    """
-    import platform
-
-    if platform.system() != "Linux":
-        logger.warning("[qqmusic] 非 Linux 环境，跳过 playwright install-deps 系统依赖安装")
-        return None
-    _switch_apt_to_aliyun()
-    cmd = [sys.executable, "-m", "playwright", "install-deps", "chromium"]
-    logger.info(f"[qqmusic] 正在安装 Chromium 系统依赖: {' '.join(cmd)}")
-    env = os.environ.copy()
-    env["PLAYWRIGHT_DOWNLOAD_HOST"] = "https://npmmirror.com/mirrors/playwright/"
-    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
-
-
-def _ensure_playwright_pkg():
-    """确保 playwright Python 包已安装（缺失时自动 pip 安装，附带清华镜像源加速）。"""
-    try:
-        import importlib.util
-        if importlib.util.find_spec("playwright") is not None:
-            logger.info("[qqmusic] playwright Python 包已存在")
-            return True
-    except Exception as e:
-        logger.warning(f"[qqmusic] 检查 playwright 包失败（将尝试安装）: {e}")
-    cmd = [sys.executable, "-m", "pip", "install", "-U", "playwright"]
-    logger.info(f"[qqmusic] 正在自动安装 playwright Python 包: {' '.join(cmd)}")
-    env = os.environ.copy()
-    env["PIP_INDEX_URL"] = os.environ.get(
-        "PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple"
-    )
-    res = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    if res.returncode != 0:
-        logger.error(f"[qqmusic] 自动安装 playwright 包失败: {res.stderr}")
-        return False
-    try:
-        importlib.invalidate_caches()
-        if importlib.util.find_spec("playwright") is None:
-            logger.error("[qqmusic] playwright 包安装后仍不可用")
-            return False
-    except Exception:
-        pass
-    logger.info("[qqmusic] playwright Python 包安装完成！")
-    return True
-
-
-def _install_chromium_sync():
-    """确保 playwright Python 包已安装，并在子线程中同步执行 playwright install chromium（附带 npmmirror 加速镜像源）。"""
-    if not _ensure_playwright_pkg():
-        raise RuntimeError("playwright Python 包安装失败，请手动执行: pip install -U playwright")
-    cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
-    logger.info(f"[qqmusic] 正在自动安装 Playwright Chromium: {' '.join(cmd)}")
-    env = os.environ.copy()
-    env["PLAYWRIGHT_DOWNLOAD_HOST"] = "https://npmmirror.com/mirrors/playwright/"
-    res = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    if res.returncode != 0:
-        logger.error(f"[qqmusic] 自动安装 Chromium 失败: {res.stderr}")
-        raise RuntimeError(f"Playwright Chromium 安装失败: {res.stderr or res.stdout}")
-    logger.info("[qqmusic] Playwright Chromium 安装完成！")
-
-
-def _ensure_runtime_sync():
-    """跨平台确保 Playwright 渲染运行时全部就绪（幂等，首次调用执行一次）。
-
-    按顺序保证三步：
-      1. 确保 playwright Python 包已安装（缺失则 pip 装清华镜像；装不到位直接抛异常）
-      2. 仅 Linux：切阿里 apt 源并用 install-deps 安装系统运行库（失败仅告警，不阻塞）
-      3. 下载 Chromium 二进制（npmmirror 加速）
-    """
-    global _runtime_checked
-    if _runtime_checked:
-        return True
-    if not _ensure_playwright_pkg():
-        raise RuntimeError("playwright Python 包安装失败，请手动执行: pip install -U playwright")
-    _install_deps_sync()
-    _install_chromium_sync()
-    _runtime_checked = True
-    return True
-
-
-async def _ensure_runtime():
-    await asyncio.to_thread(_ensure_runtime_sync)
+    global _hint_logged
+    if _hint_logged:
+        logger.warning(f"[qqmusic] 卡片渲染不可用（{reason}），已回退纯文本")
+        return
+    _hint_logged = True
+    logger.error(f"[qqmusic] 卡片渲染不可用（{reason}）。\n{_RENDER_TUTORIAL}")
 
 
 async def _get_browser():
-
-    await _ensure_runtime()
+    """获取常驻 Chromium 实例；环境不可用返回 None（由调用方回退文本）。"""
     global _playwright, _browser
     if _browser is not None:
         return _browser
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as e:
+        _log_env_hint(f"缺少依赖 {e.name}")
+        return None
     async with _lock:
-        if _browser is None:
-            try:
-                from playwright.async_api import async_playwright
-            except Exception as e:
-                logger.warning(f"[qqmusic] playwright Python 包不可用（{e}），正在自动安装...")
-                await asyncio.to_thread(_install_chromium_sync)
-                from playwright.async_api import async_playwright
-
-            _playwright = await async_playwright().start()
-            try:
-                _browser = await _playwright.chromium.launch(
-                    headless=True,
-                    args=_CHROME_ARGS,
-                )
-            except Exception as e:
-                err_msg = str(e)
-                if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
-                    logger.warning("[qqmusic] 未找到 Playwright Chromium，正在尝试通过 npmmirror 镜像源自动下载安装...")
-                    await asyncio.to_thread(_install_chromium_sync)
-                    _browser = await _playwright.chromium.launch(
-                        headless=True,
-                        args=_CHROME_ARGS,
-                    )
-                elif "error while loading shared libraries" in err_msg or "shared object file" in err_msg:
-                    # 二进制已下载但容器缺系统运行库（libnspr4/libnss3 等）。
-                    # playwright install 只下载二进制、不装 OS 包；先切阿里 apt 源再
-                    # install-deps（需 apt + root），失败则给出可直接执行的安装命令。
-                    logger.warning("[qqmusic] Chromium 缺少系统运行库，尝试执行 playwright install-deps 自动安装...")
-                    res = await asyncio.to_thread(_install_deps_sync)
-                    if res is not None and res.returncode == 0:
-                        logger.info("[qqmusic] playwright install-deps 完成，重新启动浏览器...")
-                        _browser = await _playwright.chromium.launch(
-                            headless=True,
-                            args=_CHROME_ARGS,
-                        )
-                    else:
-                        hint = (
-                            "请在容器内以 root 执行：\n"
-                            "python -m playwright install-deps chromium\n"
-                            "或手动：apt-get update && apt-get install -y libnspr4 libnss3 "
-                            "libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxfixes3 "
-                            "libxrandr2 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 "
-                            "libcairo2 libcups2 libdrm2 libxkbcommon0 libxext6 libpango-1.0-0"
-                        )
-                        logger.error(
-                            f"[qqmusic] 自动安装系统依赖失败，请手动安装后重试：\n{hint}\n\n安装输出：\n{res.stdout[-2000:]}\n{res.stderr[-2000:]}"
-                        )
-                        raise
-                else:
-                    raise e
+        if _browser is not None:
+            return _browser
+        pw = None
+        try:
+            pw = await async_playwright().start()
+            _browser = await pw.chromium.launch(headless=True, args=_CHROME_ARGS)
+            _playwright = pw
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "Executable doesn't exist" in msg or "playwright install" in msg:
+                _log_env_hint("未下载 Chromium")
+            elif "shared libraries" in msg or "shared object" in msg:
+                # 二进制存在但容器缺 libnspr4/libnss3 等系统运行库
+                _log_env_hint("Chromium 缺少系统运行库")
+            else:
+                logger.error(f"[qqmusic] Chromium 启动失败: {e}")
+            # 清理半初始化的 playwright 运行时，避免进程残留
+            if pw is not None:
+                with contextlib.suppress(Exception):
+                    await pw.stop()
+            return None
     return _browser
 
 
 async def render_html_to_png(html: str, out_path: str) -> bool:
 
     browser = await _get_browser()
+    if browser is None:
+        return False
     page = await browser.new_page(
         viewport={"width": 640, "height": 2200, "device_scale_factor": 3}
     )
@@ -289,6 +155,9 @@ async def render_html_to_png(html: str, out_path: str) -> bool:
             omit_background=False,
         )
         return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[qqmusic] 渲染失败: {e}")
+        return False
     finally:
         await page.close()
 

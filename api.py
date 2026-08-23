@@ -954,19 +954,27 @@ async def daily_recommend(
 async def user_favorites(
     *, song_begin: int = 0, song_num: int = 30, user_key: str = ""
 ) -> dict:
-    """我的收藏：优先 /user/liked 专用端点，失败回退 /cgi disslist(201)"""
-    try:
-        body = await request(
-            "/user/liked",
-            {"songBegin": song_begin, "num": song_num},
-            "get",
-            user_key,
-        )
-        return _diss_payload(body)
-    except ApiError:
-        return await user_diss_list(
-            201, song_begin=song_begin, song_num=song_num, user_key=user_key
-        )
+    """我的收藏：优先 /user/liked 专用端点，失败回退 /cgi disslist(201)。
+
+    大数量请求（>30）两个端点都失败时，自动降级为 30 再试一次。
+    """
+    for num in list(dict.fromkeys((int(song_num), min(int(song_num), 30)))):
+        try:
+            try:
+                body = await request(
+                    "/user/liked",
+                    {"songBegin": song_begin, "num": num},
+                    "get",
+                    user_key,
+                )
+                return _diss_payload(body)
+            except ApiError:
+                return await user_diss_list(
+                    201, song_begin=song_begin, song_num=num, user_key=user_key
+                )
+        except ApiError:
+            continue
+    raise ApiError("获取收藏列表失败")
 
 
 # ──────────── 搜索扩展 ────────────

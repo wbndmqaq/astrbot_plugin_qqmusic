@@ -248,8 +248,8 @@ def build_list_card_data(
     cfg = cfg or {}
     options = options or {}
     has_mv = any(bool(s.get("mvVid")) for s in songs)
-    # 常用指令：原卡片底部「小提示」的内容并入此列表
-    commands = [
+    # 常用指令：原卡片底部「小提示」的内容并入此列表；options.commands 可整体替换
+    default_commands = [
         {
             "name": "#qqm听序号",
             "desc": options.get("tip")
@@ -262,21 +262,30 @@ def build_list_card_data(
             "example": "#qqm歌词1",
         },
     ]
+    if not options.get("commands"):
+        default_commands.append(
+            {
+                "name": "#qqm听所有",
+                "desc": "依次连播当前列表的全部歌曲（上限 30 首）",
+                "example": "#qqm听所有",
+            }
+        )
     if has_mv:
-        commands.append(
+        default_commands.append(
             {
                 "name": "#qqmMV 播放 序号",
                 "desc": "播放 / 下载该曲 MV（列表带 🎬 即是有 MV 的歌曲）",
                 "example": "#qqmMV 播放 1",
             }
         )
-    commands.append(
+    default_commands.append(
         {
             "name": "列表有效期",
             "desc": "本列表约 10 分钟内有效，过期请重新搜索",
             "example": "#qqm点歌 关键词",
         }
     )
+    commands = options.get("commands") or default_commands
     return {
         "keyword": keyword or "歌曲列表",
         "total": len(songs),
@@ -298,6 +307,57 @@ def build_list_card_data(
         "hasMv": has_mv,
         "commands": commands,
     }
+
+
+def build_mv_list_card_data(
+    keyword: str, mvs: list, *, cfg: dict | None = None
+) -> dict:
+    """MV 列表卡片：复用 qqmusic-list 模板，MV 字段映射为列表条目。
+
+    序号与 #qqmMV 播放/下载 序号 对应；封面/时长沿用 MV 数据。
+    """
+    cfg = cfg or {}
+    songs = []
+    for i, m in enumerate(mvs if isinstance(mvs, list) else []):
+        title = m.get("mvtitle") or m.get("name") or m.get("songName") or "未知"
+        sec = int(m.get("duration") or 0)
+        songs.append(
+            {
+                "index": i + 1,
+                "songName": str(title),
+                "singerName": m.get("singerName") or "未知",
+                "albumName": m.get("pubdate") or "",
+                "cover": m.get("cover") or "",
+                "duration": f"{sec // 60}:{sec % 60:02d}" if sec > 0 else "",
+                "payplay": False,
+                "mvVid": m.get("vid") or "",  # 有 vid 即带 🎬 徽标
+            }
+        )
+    return build_list_card_data(
+        keyword,
+        songs,
+        options={
+            "tip": "播放当前列表中的指定 MV（也可 #qqmMV 下载 序号）",
+            "commands": [
+                {
+                    "name": "#qqmMV 播放 序号",
+                    "desc": "播放该 MV（视频消息，可直接观看）",
+                    "example": "#qqmMV 播放 1",
+                },
+                {
+                    "name": "#qqmMV 下载 序号",
+                    "desc": "以文件形式发送该 MV，可保存",
+                    "example": "#qqmMV 下载 1",
+                },
+                {
+                    "name": "列表有效期",
+                    "desc": "本列表约 10 分钟内有效，过期请重新搜索",
+                    "example": "#qqmMV 搜索 关键词",
+                },
+            ],
+        },
+        cfg=cfg,
+    )
 
 
 def build_hot_card_data(items: list, cfg: dict | None = None) -> dict:
@@ -348,9 +408,7 @@ def build_lyric_card_data(
     cfg: dict | None = None,
 ) -> dict:
     cfg = cfg or {}
-    body = [
-        str(ln or "").strip() for ln in (lines or []) if str(ln or "").strip()
-    ][:36]
+    body = [str(ln or "").strip() for ln in (lines or []) if str(ln or "").strip()]
     return {
         "songName": song_name,
         "singerName": singer_name,
@@ -360,9 +418,7 @@ def build_lyric_card_data(
         "lines": body,
         "lineCount": len(body),
         "apiHint": api_hint_for(cfg),
-        "tip": "仅展示前 36 行，完整歌词请到 QQ 音乐查看"
-        if len(body) >= 36
-        else "已去除时间戳，纯文本歌词",
+        "tip": "已去除时间戳，纯文本歌词（超长歌词自动分页）",
     }
 
 
@@ -550,6 +606,11 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
                         "name": "选择曲目",
                         "desc": "播放当前列表第 N 首",
                         "example": "#qqm听1",
+                    },
+                    {
+                        "name": "连播列表",
+                        "desc": "依次发送当前列表全部歌曲（上限 30 首）",
+                        "example": "#qqm听所有",
                     },
                     {
                         "name": "直接播放",
