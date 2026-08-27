@@ -23,6 +23,26 @@ UA = (
 _cfg_getter = None
 
 
+def normalize_api_base(raw: str | None) -> str:
+    """归一化 apiBase：兼容用户手改配置文件时的常见写法问题，
+    不再因格式问题抛裸的 Invalid URL：
+     - 漏写 http:// / https:// 协议头（如 127.0.0.1:3300）→ 自动补 http://
+     - 中文输入法的全角冒号（http：//）→ 转半角
+     - 复制粘贴带入的首尾引号、空格、零宽字符 / BOM → 清除
+    """
+    s = str(raw or "")
+    s = re.sub(r"[\u200b-\u200d\u2060\ufeff]", "", s)
+    s = re.sub(r"^[\"'`]+|[\"'`]+$", "", s)
+    s = s.replace("：", ":").strip()
+    if not s:
+        return ""
+    if re.match(r"^https?://", s, re.IGNORECASE):
+        return s.rstrip("/")
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", s, re.IGNORECASE):
+        s = f"http://{s}"
+    return s.rstrip("/")
+
+
 def set_config_getter(fn):
     global _cfg_getter
     _cfg_getter = fn
@@ -50,8 +70,8 @@ class ApiError(Exception):
 
 
 def _get_base() -> str:
-    base = str(_cfg().get("apiBase") or "")
-    return base.rstrip("/")
+    base = normalize_api_base(str(_cfg().get("apiBase") or ""))
+    return base or "http://127.0.0.1:3300"
 
 
 def _get_token() -> str:
@@ -139,6 +159,8 @@ async def request(
                     return await _handle_response(res)
     except aiohttp.ClientConnectorError as e:
         raise ApiError(f"无法连接 QQ 音乐 API（{base}），请先申请API") from e
+    except (aiohttp.InvalidURL, ValueError) as e:
+        raise ApiError("API 地址无效，请检查配置里的 apiBase（需形如 http://IP:端口）") from e
     except aiohttp.ServerTimeoutError as e:
         raise ApiError(f"请求超时：{base}") from e
     except aiohttp.ClientError as e:

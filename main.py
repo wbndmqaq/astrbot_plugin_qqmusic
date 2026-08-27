@@ -324,8 +324,7 @@ class QQMusicPlugin(Star):
                 )
                 return None
             # 卡片 PNG 发送后延迟清理，防止 temp 目录无限增长
-            loop = asyncio.get_event_loop()
-            loop.call_later(120, lambda p=file_path: self._safe_unlink(p))
+            asyncio.get_running_loop().call_later(120, lambda p=file_path: self._safe_unlink(p))
             return file_path
         except Exception as e:
             self._log_warn(f"{tpl_name} 渲染失败: {e}")
@@ -777,26 +776,23 @@ class QQMusicPlugin(Star):
         *,
         source: str,
         mv_vid: str = "",
+        tip: str = "",
     ):
 
         q_label = play.get("qualityLabel") or play.get("quality") or ""
+        cfg = self._cfg()
         card_data = cardlib.build_detail_card_data(
             song,
             quality_label=q_label,
             payplay=bool(song.get("payplay")),
             source=source,
             has_url=bool(play.get("url")),
+            mv_vid=mv_vid,
+            tip=tip,
+            degrade_note=play.get("degradeNote") or "",
+            error=play.get("error") or "",
+            cfg=cfg,
         )
-        if play.get("url"):
-            tip = f"正在下载并发送语音（{q_label or '默认音质'}）..."
-        else:
-            err_txt = play["error"] if play.get("error") else ""
-            tip = f"获取播放链接失败{('：' + err_txt) if err_txt else ''}\n请 #qqm登录"
-        if play.get("degradeNote"):
-            tip += f" · {play['degradeNote']}"
-        if mv_vid:
-            tip += " · 🎬 该曲有 MV：#qqmMV 播放/下载 直接操作"
-        card_data["tip"] = tip
         url = await self._render_card(event, card_data, "qqmusic-detail")
         if url:
             await self._send_chain(event, Image.fromFileSystem(url))
@@ -812,8 +808,7 @@ class QQMusicPlugin(Star):
 
     @filter.regex(r"^#?(qq|QQ)m\s*歌词\s*(.*)$")
     async def get_lyric(self, event: AstrMessageEvent):
-        """#qqm歌词 [关键词]：先选歌（回复 #qqm听N）再显示歌词"""
-
+        """#qqm歌词 关键词 / 歌曲链接 / 序号：支持直接按序号、关键词、链接查词"""
 
         cfg = self._cfg()
         if not cfg.get("enable", True):
@@ -823,25 +818,93 @@ class QQMusicPlugin(Star):
         )
         if not m:
             return
-        await self._start_select(
-            event,
-            "lyric",
-            m.group(1).strip(),
-            label="歌词",
-            verb="查看歌词",
-            user_key=self._user_key(event),
-        )
+        key = m.group(1).strip()
+        if not key:
+            await self._reply(event, "用法：#qqm歌词 关键词 / 歌曲链接 / 序号")
+            event.stop_event()
+            return
+
+        user_key = self._user_key(event)
+        songmid = key
+        song_meta = {"songName": key, "singerName": "", "cover": "", "albumName": ""}
+
+        # #qqm歌词1~99：取点歌/解析列表第 N 首（与 #qqm听N 同源），避免把序号当关键词搜索
+        if re.match(r"^\d{1,2}$", key):
+            scope = self._scope(event)
+            session = await cardlib.SessionStore.get(self, scope)
+            n = int(key)
+            # 非歌曲列表会话：数字序号无意义，给出正确引导（关键词查词不受影响）
+            if session and session.get("type") in ("topCategory", "recommend"):
+                await self._reply(
+                    event,
+                    "当前是榜单分类列表，请先 #qqm排行 榜单名 列出歌曲"
+                    if session.get("type") == "topCategory"
+                    else "当前是推荐歌单列表，请先 #qqm推荐听序号 列出歌曲",
+                )
+                event.stop_event()
+                return
+            if session and session.get("type") == "mvList":
+                await self._reply(event, "当前列表是 MV，请用 #qqmMV 播放 序号；查歌词请先 #qqm点歌")
+                event.stop_event()
+                return
+            session_data = (session or {}).get("data") or []
+            if session_data and 1 <= n <= len(session_data):
+                song = session_data[n - 1]
+                mid = song.get("songmid") or song.get("songMid") or ""
+                if not mid:
+                    await self._reply(event, "该歌曲缺少 songmid，无法查询歌词，请用 #qqm歌词 关键词")
+                    event.stop_event()
+                    return
+                songmid = mid
+                song_meta = {
+                    "songName": song.get("songName") or key,
+                    "singerName": song.get("singerName") or "",
+                    "cover": song.get("cover") or "",
+                    "albumName": song.get("albumName") or "",
+                }
+            else:
+                await self._reply(
+                    event,
+                    f"请选择 1-{len(session_data)}"
+                    if session_data
+                    else "暂无点歌列表，请先 #qqm点歌，或用 #qqm歌词 关键词",
+                )
+                event.stop_event()
+                return
+        elif not re.match(r"^[0-9A-Za-z]{10,}$", key) or re.search(r"[\u4e00-\u9fa5]", key):
+            # 关键词搜索分支也需捕获 API 异常，避免静默无响应
+            try:
+                lst = await qqapi.search_songs(key, page_size=1, user_key=user_key)
+                if not lst:
+                    await self._reply(event, "未找到歌曲")
+                    event.stop_event()
+                    return
+                first = lst[0]
+                songmid = first.get("songmid") or first.get("songMid") or ""
+                song_meta = {
+                    "songName": first.get("songName") or key,
+                    "singerName": first.get("singerName") or "",
+                    "cover": first.get("cover") or "",
+                    "albumName": first.get("albumName") or "",
+                }
+            except Exception as err:
+                await self._reply(event, f"歌词失败：{err}")
+                event.stop_event()
+                return
+
+        await self._show_lyric_by_meta(event, songmid, song_meta, user_key)
         event.stop_event()
 
-    async def _show_lyric(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
-        """显示所选歌曲的歌词（#qqm听N 触发）。超过 36 行自动分页成多张卡片。"""
-        songmid = song.get("songmid") or song.get("songMid") or ""
+    async def _show_lyric_by_meta(
+        self, event: AstrMessageEvent, songmid: str, song_meta: dict, user_key: str
+    ) -> None:
+        """显示指定 songmid 的歌词。超过 36 行自动分页成多张卡片。"""
         if not songmid:
             await self._reply(event, "该歌曲缺少 songmid，无法获取歌词")
             return
         try:
             data = await qqapi.lyric(songmid, user_key)
-        except Exception as err:  # noqa: BLE001  # 防御：歌词失败不崩 handler
+        except Exception as err:  # noqa: BLE001
             self._log_warn(f"歌词失败: {err}")
             await self._reply(event, f"歌词失败：{err}")
             return
@@ -855,15 +918,14 @@ class QQMusicPlugin(Star):
         if not lines:
             await self._reply(event, "暂无歌词")
             return
-        # 分页完整展示（此前只显示前 36 行）
         pages = [lines[i : i + 36] for i in range(0, len(lines), 36)]
         total = len(lines)
         for pi, page_lines in enumerate(pages):
             card = cardlib.build_lyric_card_data(
-                song_name=song.get("songName") or "",
-                singer_name=song.get("singerName") or "",
-                cover=song.get("cover") or "",
-                album_name=song.get("albumName") or "",
+                song_name=song_meta.get("songName") or "",
+                singer_name=song_meta.get("singerName") or "",
+                cover=song_meta.get("cover") or "",
+                album_name=song_meta.get("albumName") or "",
                 songmid=songmid,
                 lines=page_lines,
                 cfg=self._cfg(),
@@ -878,6 +940,11 @@ class QQMusicPlugin(Star):
             )
             if not ok:
                 break
+
+    async def _show_lyric(self, event: AstrMessageEvent, song: dict, user_key: str) -> None:
+        """兼容旧调用：显示所选歌曲对象的歌词。"""
+        songmid = song.get("songmid") or song.get("songMid") or ""
+        await self._show_lyric_by_meta(event, songmid, song, user_key)
 
     @filter.regex(r"^#?(qq|QQ)m\s*热搜$")
     async def hot_search(self, event: AstrMessageEvent):
@@ -1244,6 +1311,16 @@ class QQMusicPlugin(Star):
                     return
                 if n < 1 or n > len(session["data"]):
                     await self._reply(event, f"请选择 1-{len(session['data'])}")
+                    event.stop_event()
+                    return
+                if session.get("type") in ("topCategory", "recommend"):
+                    # 非歌曲列表会话：data 是榜单/歌单对象，无 MV 概念，给出正确引导
+                    await self._reply(
+                        event,
+                        "当前是榜单分类列表，请先 #qqm排行 榜单名 列出歌曲"
+                        if session.get("type") == "topCategory"
+                        else "当前是推荐歌单列表，请先 #qqm推荐听序号 列出歌曲",
+                    )
                     event.stop_event()
                     return
                 if session.get("type") == "mvList":
@@ -2255,8 +2332,10 @@ class QQMusicPlugin(Star):
         }
         if song.get("songmid"):
             try:
-                if not song.get("media_mid") or song.get("media_mid") == song.get(
-                    "songmid"
+                # 详情补 media_mid（仅当来自卡片/链接且没查过详情时；_ids_to_song 已填充则不重复请求）
+                if not song.get("_detailFetched") and (
+                    not song.get("media_mid")
+                    or song.get("media_mid") == song.get("songmid")
                 ):
                     try:
                         detail = await qqapi.song_detail(song["songmid"], user_key)
@@ -2290,6 +2369,8 @@ class QQMusicPlugin(Star):
             except Exception as err:
                 self._log_warn(f"播放链: {err}")
                 play["error"] = str(err)
+        else:
+            play["error"] = "未能从分享中提取歌曲 songmid，无法取播放链"
 
         q_label = (
             play.get("qualityLabel")
@@ -2319,29 +2400,29 @@ class QQMusicPlugin(Star):
             payplay=bool(song.get("payplay")),
             source=("卡片" if from_card else "链接"),
             has_url=bool(play.get("url")),
+            tip=fail_hint if (not play.get("url") and fail_hint) else "",
+            degrade_note=play.get("degradeNote") or "",
+            error=play.get("error") or "",
+            cfg=cfg,
         )
-        tip = (
-            f"正在下载并发送语音（{q_label or '默认音质'}）..."
-            if play.get("url")
-            else (fail_hint or "未获取到播放链接")
-        )
-        if play.get("degradeNote"):
-            tip += f" · {play['degradeNote']}"
-        card_data["tip"] = tip
         url = await self._render_card(event, card_data, "qqmusic-detail")
         if url:
             await self._send_chain(event, Image.fromFileSystem(url))
         else:
             text_block = [
-                f"{prefix}QQ音乐 · 解析下载中",
+                f"{prefix}QQ音乐 · 解析完成",
                 cardlib.format_detail_text(
                     song, quality_label=q_label, has_url=bool(play.get("url"))
                 ),
             ]
+            if play.get("degradeNote"):
+                text_block.append(f"音质说明：{play['degradeNote']}")
             if fail_hint:
                 text_block.append(fail_hint)
             await self._reply(event, "\n".join(t for t in text_block if t))
 
+        # 根据用户配置递送音乐（语音 / 群文件 / 原生卡 / 自定义卡）
+        # 文本已由详情卡展示，跳过 deliver_song 内的纯文本；卡片/语音/文件按 cfg 正常生效
         await deliver_song(
             self,
             event,
@@ -2349,7 +2430,7 @@ class QQMusicPlugin(Star):
             play,
             cfg=self._cfg(),
             plugin_dir=PLUGIN_DIR,
-            options=_SKIP_ALL,
+            options=_SKIP_TEXT,
         )
         return True
 
@@ -2358,9 +2439,9 @@ class QQMusicPlugin(Star):
             return await self._ids_to_song(card, "", user_key)
         if card.get("keyword") or card.get("title"):
             kw = (
-                card.get("keyword") or f"{card.get('title', '')} {card.get('desc', '')}"
+                card.get("keyword") or f"{card.get("title", "")} {card.get("desc", "")}"
             ).strip()
-            lst = await qqapi.search_songs(kw, page_size=5)
+            lst = await qqapi.search_songs(kw, page_size=5, user_key=user_key)
             if lst:
                 hit = lst[0]
                 # 标题匹配最佳结果
@@ -2447,6 +2528,7 @@ class QQMusicPlugin(Star):
                     "albumName": album.get("name") or "",
                     "albummid": albummid,
                     "cover": qqapi.cover_url(albummid) if albummid else "",
+                    "_detailFetched": True,
                 }
             except Exception as err:
                 self._log_warn(f"详情失败: {err}")
@@ -2458,7 +2540,7 @@ class QQMusicPlugin(Star):
             .strip()
         )
         if prefix:
-            lst = await qqapi.search_songs(prefix, page_size=3)
+            lst = await qqapi.search_songs(prefix, page_size=3, user_key=user_key)
             if lst:
                 return lst[0]
 
@@ -2703,6 +2785,8 @@ class QQMusicPlugin(Star):
                 task["statusBaseline"] = {"uin": "", "hasKey": False, "login": False}
 
         asyncio.create_task(_baseline())
+
+        loop = asyncio.get_event_loop()
 
         async def _finish_ok(info):
             if task["stopped"]:
@@ -2982,6 +3066,8 @@ class QQMusicPlugin(Star):
         }
         self._register_task(user_id, task)
 
+        loop = asyncio.get_event_loop()
+
         async def _finish_ok(info):
             if task["stopped"]:
                 return
@@ -3046,10 +3132,9 @@ class QQMusicPlugin(Star):
                 and self._active_logins.get(user_id, {}).get("sessionId") == session_id
             ):
                 task["timer"] = loop.call_later(
-                    2.5, lambda: asyncio.create_task(_tick())
+                    task.get("pollInterval", 2), lambda: asyncio.create_task(_tick())
                 )
 
-        loop = asyncio.get_event_loop()
         task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
 
     @filter.regex(
@@ -3482,14 +3567,14 @@ class QQMusicPlugin(Star):
                     login_line,
                     adapter_line,
                     version_line,
-                    f"点歌: {c.get('enableSongRequest', True)}"
-                    f"  解析: {c.get('enableResolve', True)}",
-                    f"音质: {c.get('quality', 'auto')}"
-                    f"（自动降级: {c.get('qualityFallback', True) is not False}）"
-                    f"  列表: {c.get('maxList', 10)}",
+                    f"点歌: {c.get('enableSongRequest', True)}  解析: {c.get('enableResolve', True)}",
+                    (
+                        f"音质: {c.get('quality', 'auto')}"
+                        f"（自动降级: {c.get('qualityFallback', True) is not False}）"
+                        f"  列表: {c.get('maxList', 10)}"
+                    ),
                     f"语音: {c.get('sendVocal', True)}  群文件: {c.get('uploadFile', True)}",
-                    f"原生卡: {c.get('sendNativeCard', False)}"
-                    f"  自定义卡: {c.get('sendCustomCard', False)}",
+                    f"原生卡: {c.get('sendNativeCard', False)}  自定义卡: {c.get('sendCustomCard', False)}",
                     "",
                     "主人命令：",
                     "#qqm登录          无感扫码（QQ 码，覆盖 QQ/App，主通道）",
@@ -3645,15 +3730,14 @@ class QQMusicPlugin(Star):
             "tip": "详细开关可在 AstrBot 管理面板修改",
         }
 
-    @filter.regex(r"^#?(qq|QQ)m\s*api\s*(https?://\S+)$")
+    @filter.regex(r"^#?(qq|QQ)m\s*api\s*(\S+)$")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def set_api(self, event: AstrMessageEvent):
         """#qqm api <地址> 设置 API 地址（主人）"""
 
-
-        m = re.search(r"api\s*(https?://\S+)", event.message_str, re.IGNORECASE)
-        url = m.group(1).rstrip("/") if m else ""
-        if not url:
+        m = re.search(r"api\s*(\S+)", event.message_str, re.IGNORECASE)
+        url = qqapi.normalize_api_base(m.group(1)) if m else ""
+        if not url or not re.match(r"^https?://", url, re.IGNORECASE):
             await self._reply(event, "用法：#qqm api http://你的API地址:端口")
             event.stop_event()
             return
@@ -3662,7 +3746,7 @@ class QQMusicPlugin(Star):
             self.config.save_config()
         except Exception as e:
             self._log_warn(f"配置保存失败: {e}")
-        await self._reply(event, "API 地址已更新")
+        await self._reply(event, f"API 地址已更新：{cardlib.mask_api_base(url)}")
         event.stop_event()
 
     @filter.regex(r"^#?(qq|QQ)m\s*(开启|关闭)(点歌|解析)$")

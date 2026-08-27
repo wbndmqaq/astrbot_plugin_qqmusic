@@ -508,8 +508,57 @@ def build_comment_card_data(
     }
 
 
+def build_delivery_tip(
+    cfg: dict | None = None,
+    *,
+    quality_label: str = "",
+    has_url: bool = False,
+    degrade_note: str = "",
+    error: str = "",
+) -> str:
+    """生成基于当前配置的动态提示文案：精准反映当前会发送什么（语音 / 群文件 / 原生卡 / 自定义卡）"""
+    cfg = cfg or {}
+    if not has_url:
+        if error:
+            return f"获取播放链接失败：{error}"
+        return "未获取到播放链接，请 #qqm登录"
+
+    q = quality_label or "默认音质"
+    send_vocal = cfg.get("sendVocal") is not False
+    upload_file = cfg.get("uploadFile") is not False
+    send_native = bool(cfg.get("sendNativeCard"))
+    send_custom = bool(cfg.get("sendCustomCard"))
+
+    actions = []
+    if send_vocal:
+        actions.append("语音")
+    if upload_file:
+        actions.append("群文件")
+    if send_native or send_custom:
+        actions.append("音乐卡片")
+
+    main = (
+        f"正在发送{' + '.join(actions)}（{q}）..."
+        if actions
+        else f"已获取播放链接（{q}）"
+    )
+    if degrade_note:
+        main += f" · {degrade_note}"
+    return main
+
+
 def build_detail_card_data(
-    song: dict, *, quality_label="", payplay=False, source="", has_url=False
+    song: dict,
+    *,
+    quality_label="",
+    payplay=False,
+    source="",
+    has_url=False,
+    mv_vid="",
+    tip="",
+    degrade_note="",
+    error="",
+    cfg: dict | None = None,
 ) -> dict:
     is_vip = bool(song.get("payplay")) or payplay
 
@@ -518,6 +567,16 @@ def build_detail_card_data(
         source_text = "🔗 链接解析"
     elif source == "卡片":
         source_text = "📋 卡片解析"
+
+    active_cfg = cfg or {}
+    base_tip = tip or build_delivery_tip(
+        active_cfg,
+        quality_label=quality_label,
+        has_url=has_url,
+        degrade_note=degrade_note,
+        error=error,
+    )
+    mv_hint = f" · 🎬 该曲有 MV：#qqmMV 播放/下载 直接操作" if mv_vid else ""
 
     return {
         "songName": song.get("songName") or "未知",
@@ -529,9 +588,7 @@ def build_detail_card_data(
         "payplay": is_vip,
         "showPay": True,
         "source": source_text,
-        "tip": f"正在下载并发送语音（{quality_label or '默认音质'}）..."
-        if has_url
-        else "未获取到播放链接",
+        "tip": f"{base_tip}{mv_hint}",
     }
 
 
@@ -619,7 +676,7 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
                     },
                     {
                         "name": "查看歌词",
-                        "desc": "按歌名或 mid 取歌词",
+                        "desc": "按歌名/mid 取歌词；点歌后 #qqm歌词1 取列表第 1 首歌词",
                         "example": "#qqm歌词 七里香",
                     },
                     {
@@ -673,6 +730,11 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
                         "name": "推荐歌单",
                         "desc": "热门推荐歌单列表",
                         "example": "#qqm推荐",
+                    },
+                    {
+                        "name": "打开推荐歌单",
+                        "desc": "查看第 N 个推荐歌单的歌曲",
+                        "example": "#qqm推荐听1",
                     },
                     {
                         "name": "随机推荐",
