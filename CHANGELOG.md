@@ -1,6 +1,18 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v2.0.0] - 架构全面模块化重构 + 纯异步加固 + 语法兼容性修复
+
+*   **🏗️ 架构升级 · 全面模块化**：
+    *   主入口 `main.py` 改造为纯净 Star 生命周期入口（~50行），指令系统按业务领域拆解为 `play`（播放/连播）、`explore`（探索/榜单/MV）、`detail`（详情/歌词/评论）、`auth`（登录/认证/绑定）、`system`（系统/设置/测试）、`share`（卡片与链接解析）六大独立处理器；
+    *   核心业务下沉至 `core/service.py`（`MusicService`），底层 `api`、`cards`、`delivery`、`quality`、`render`、`tpl_adapter` 统一规范存放于 `core/` 目录。
+*   **⚡ 纯异步与内存安全**：
+    *   所有文件 I/O、音频下载、转码与 Base64 编码全面走 `asyncio.to_thread` / 异步子进程，网络请求采用 `aiohttp` 上下文管理，0 阻塞风险；
+    *   完善生命周期管理，`terminate()` 时自动取消所有正在进行的扫码轮询任务并主动关闭 Playwright 渲染引擎。
+*   **🐛 语法兼容性修复**：
+    *   修复 `_card_to_song` 方法中同名双引号嵌套 f-string 在 Python 3.10/3.11 环境下触发 `SyntaxError` 的问题。
+
+---
 ## [v1.7.6] - 详情卡动态提示 + 智能解析递送 + 歌词序号查词 + 推荐听闭环 + 全面非阻塞异步加固
 
 *   **✨ 详情卡动态提示文案**：`cards.py` 新增 `build_delivery_tip`，`build_detail_card_data` 深度结合用户当前配置（`sendVocal` / `uploadFile` / `sendNativeCard` / `sendCustomCard`），精准展示「正在发送语音 / 群文件 / 音乐卡片（音质）...」，支持降级提示（`degradeNote`）与失败原因细分（`error`），彻底告别死板硬编码文案。

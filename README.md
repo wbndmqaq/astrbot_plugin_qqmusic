@@ -6,6 +6,8 @@
 
 > 从 Yunzai-Bot [qqmusic-plugin](https://github.com/zaras123/qqmusic-plugin) 移植而来的 AstrBot 版本
 
+---
+
 ## 功能一览
 
 | 分类 | 指令 | 说明 |
@@ -46,6 +48,8 @@
 | ⚙️ 配置 | `#qqm 测试` | 测试 API 连通（主人） |
 | ⚙️ 配置 | `#qqm 账号` | 已登录账号列表（主人） |
 
+---
+
 ### 音质选项
 
 `128` / `m4a` / `320` / `flac` / `ape` / `hires` / `atmos` / `master` / `atmos_master`
@@ -56,16 +60,14 @@
 
 > 📌 **关于语音发送**：FLAC 等高音质文件直接作为语音消息会被协议端以体积/格式拒绝，插件发送语音前会自动用 **ffmpeg** 压成紧凑 mp3（需系统安装 ffmpeg，`ffmpeg -version` 可验证；缺失时自动回退原始文件）。若 **PC QQ 播放不了高清语音**，可在管理面板开启「禁用高清语音」（`disableHighQualityVocal`），语音改发 mono16k 低音质，PC 可正常播放；群文件仍保留高音质。
 
-## 安装
+---
 
-### 1. 安装插件
+## 安装&配置API教程
 
-将本插件放到 AstrBot 的 `data/plugins/`
+### 1.安装
 
-```bash
-cd AstrBot/data/plugins
-git clone https://github.com/wbndmqaq/astrbot_plugin_qqmusic
-```
+AstrBot WebUI → 插件管理 → 搜索 `astrbot_plugin_neteasemusic` → 安装。
+
 
 重启 AstrBot，日志出现加载即成功
 
@@ -77,7 +79,15 @@ git clone https://github.com/wbndmqaq/astrbot_plugin_qqmusic
 - **API 地址**（apiBase）
 - **API Token**（apiToken，与 API 端 `QQMUSIC_API_TOKEN` 一致）
 
-## 📮 用户群
+或主人发送：`#qqm api <地址>`。
+
+### 3. 登录
+
+主人发送 `#qqm登录` 无感扫码即可开始使用（一张 QQ 码，QQ / QQ音乐 App 通用；微信场景用 `#qqm登录微信`，QQ音乐 App 备用通道 `#qqm登录qq`）。
+
+---
+
+## 用户群
 
 API申请QQ群：[点击加入](https://qm.qq.com/q/GKxEVvF8Ua)
 bug反馈QQ群：[点击加入](https://qm.qq.com/q/8sOZdZTnaw)
@@ -86,17 +96,11 @@ bug反馈QQ群：[点击加入](https://qm.qq.com/q/8sOZdZTnaw)
 - 使用问题反馈
 - 更新通知
 
-或主人发送：`#qqm api <地址>`。
-
-### 3. 登录
-
-主人发送 `#qqm登录` 无感扫码即可开始使用（一张 QQ 码，QQ / QQ音乐 App 通用；微信场景用 `#qqm登录微信`，QQ音乐 App 备用通道 `#qqm登录qq`）。
+---
 
 ## 卡片渲染
 
-自 v1.5.0 起卡片渲染改为**本地 Playwright** 截图。
-
-> 出于安全考虑，插件**绝不会**自动执行任何系统级安装——不修改 apt 源、不运行 apt-get、不自动 pip 装包、不自动下载浏览器内核。需要图片卡片时请按下面步骤手动安装（约 1~2 分钟）。
+自 v1.5.0 起卡片渲染改为**本地 Playwright** 截图。（不自动安装，需要图片卡片时请按下面步骤手动安装（约 1~2 分钟）。）
 
 ### ① 安装 playwright Python 包
 
@@ -155,6 +159,8 @@ WebUI → 插件管理 → 本插件 → 重载。
 
 环境未就绪时，日志会输出一次上述完整教程，所有指令自动回退纯文本展示，不影响点歌/解析/播放功能；安装完成后重载即可正常出图。
 
+---
+
 ## 平台适配
 
 支持平台：`aiocqhttp`、`qq_official`、`telegram`、`dingtalk`、`lark`、`kook`、`discord`、`weixin_oc`。
@@ -177,28 +183,57 @@ WebUI → 插件管理 → 本插件 → 重载。
 - `weixin_oc`（微信个人号）出站不支持语音，自动跳过语音只发文件。
 - 卡片渲染为本地 Playwright，各平台均以图片形式发送。
 
-## 项目结构
+---
 
-```
+## 目录结构
+
+```text
 astrbot_plugin_qqmusic/
-├── main.py              # 入口：所有指令与解析处理器
-├── api.py               # API客户端
-├── quality.py           # 音质档位与自适配降级
-├── delivery.py          # 音频下载与语音/文件投递
-├── cards.py             # 会话存储、隐私脱敏、卡片数据、文本兜底
-├── render.py            # 本地 Playwright 渲染（模板 → PNG）
-├── tpl_adapter.py       # art-template → Jinja2 模板适配
-├── _conf_schema.json    # 配置 Schema（管理面板）
-├── metadata.yaml        # 插件元数据
-└── resources/
-    ├── html/            # 7 个卡片模板（原样保留）
-    └── img/             # logo
+├── main.py                  # 插件生命周期入口与路由绑定（~50行）
+├── __init__.py              # 顶层包入口
+├── metadata.yaml            # 插件元信息（v2.0.0）
+├── _conf_schema.json        # 配置定义 Schema
+├── README.md                # 插件文档
+├── CHANGELOG.md             # 更新日志
+├── requirements.txt         # Python 依赖
+├── core/                    # 核心业务服务层
+│   ├── __init__.py          # 导出 MusicService
+│   ├── service.py           # 核心服务调度器（取链、卡片渲染、选歌会话调度、登录轮询生命周期）
+│   ├── api.py               # qqmusic-api 客户端封装
+│   ├── cards.py             # 会话与卡片数据构造
+│   ├── delivery.py          # 音频下载与多平台分发
+│   ├── quality.py           # 音质常量与标签映射
+│   ├── render.py            # Playwright HTML 渲染引擎
+│   └── tpl_adapter.py       # 模板适配器
+├── handlers/                # 声明式指令路由层（按领域解耦）
+│   ├── __init__.py          # 聚合导出 ALL_ROUTES
+│   ├── base.py              # 声明式 Route 基类与 AstrBot 精准匹配安装器
+│   ├── play_cmds.py         # 播放类指令（点歌/听N/连播/播放）
+│   ├── explore_cmds.py      # 探索与榜单指令（排行/新歌/MV/推荐/电台/日推/歌手/专辑/歌单等）
+│   ├── detail_cmds.py       # 详情与个人曲库指令（歌词/评论/收藏等）
+│   ├── auth_cmds.py         # 账号与登录指令（扫码登录/WebQR/DeepLink/状态/登出/多账号）
+│   ├── system_cmds.py       # 系统与设置指令（帮助/设置/音质/API/开关/测试）
+│   └── share_cmds.py        # 链接、小程序与卡片分享解析（EventMessageType.ALL）
+└── resources/               # HTML/CSS 渲染卡片与静态资源
 ```
+
+---
 
 ## 免责声明
 
 本项目仅供技术学习与交流使用。不提供任何音源服务，API 由用户自行解决；使用者应遵守所在地区法律法规及相关平台用户协议；因使用本项目产生的一切后果由使用者自行承担。
 
+---
+
 ## License
 
-MIT
+本项目采用 [MIT](LICENSE) 许可证开源。
+
+---
+
+<div align="center">
+
+如果觉得这个插件对你有帮助，欢迎 Star 一下哈哈
+
+</div>
+

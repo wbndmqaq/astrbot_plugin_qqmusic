@@ -24,8 +24,7 @@ _hint_logged = False
 
 # 手动安装教程（与 README「卡片渲染」章节保持一致）
 _RENDER_TUTORIAL = (
-    "本插件绝不自动执行任何系统级安装（不改 apt 源 / 不跑 apt-get / 不自动 pip 装包 /\n"
-    "不自动下载内核），请按以下步骤手动操作：\n"
+    "本插件不自动执行任何系统级安装，请按以下步骤手动操作：\n"
     "\n"
     "① 安装 playwright Python 包：\n"
     "     pip install playwright\n"
@@ -36,7 +35,7 @@ _RENDER_TUTORIAL = (
     "     # 国内加速：PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ \\\n"
     "     #           python -m playwright install chromium\n"
     "\n"
-    "③ 仅 Linux 容器且报 libnspr4/libnss3/shared libraries 缺失时（需 root）：\n"
+    "③    Linux 容器且报 libnspr4/libnss3/shared libraries 缺失时（需 root）：\n"
     "     python -m playwright install-deps chromium\n"
     "     # 或手动装库：apt-get update && apt-get install -y libnspr4 libnss3 libgbm1\n"
     "     #   libasound2 libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 libdrm2 \\\n"
