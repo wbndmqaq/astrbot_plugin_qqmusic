@@ -1,6 +1,11 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v2.0.1] - 投递辅助方法委托修复（点歌/MV 发送崩溃）
+
+*   **🐛 修复点歌/MV 投递全面崩溃**：v2.0.0 模块化重构后，`delivery.py`（`deliver_song` / `deliver_video`）仍以 `plugin._send_chain` / `plugin._plain` / `plugin._log_warn` / `plugin._log_info` 调用投递辅助方法，但这些方法在重构时已随业务下沉至 `MusicService`（且命名为不带下划线的 `send_chain` / `plain` / `log_warn` / `log_info`），导致 `QQMusicPlugin` 实例上不存在同名属性——`#qqmMV 播放`、点歌、语音、群文件等所有投递路径在发送阶段直接抛 `AttributeError: 'QQMusicPlugin' object has no attribute '_send_chain'`。
+
+---
 ## [v2.0.0] - 架构全面模块化重构 + 纯异步加固 + 语法兼容性修复
 
 *   **🏗️ 架构升级 · 全面模块化**：

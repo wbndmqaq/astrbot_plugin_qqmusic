@@ -191,7 +191,7 @@ WebUI → 插件管理 → 本插件 → 重载。
 astrbot_plugin_qqmusic/
 ├── main.py                  # 插件生命周期入口与路由绑定（~50行）
 ├── __init__.py              # 顶层包入口
-├── metadata.yaml            # 插件元信息（v2.0.0）
+├── metadata.yaml            # 插件元信息（v2.0.1）
 ├── _conf_schema.json        # 配置定义 Schema
 ├── README.md                # 插件文档
 ├── CHANGELOG.md             # 更新日志

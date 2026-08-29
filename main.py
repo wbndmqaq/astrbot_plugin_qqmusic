@@ -39,6 +39,19 @@ class QQMusicPlugin(Star):
         self.config = config
         self.service = MusicService(self)
 
+    # delivery.py 以 plugin._xxx 的形式调用投递辅助方法，实际实现挂在 service 上
+    async def _send_chain(self, event, *components):
+        await self.service.send_chain(event, *components)
+
+    def _plain(self, text: str):
+        return self.service.plain(text)
+
+    def _log_warn(self, msg: str):
+        self.service.log_warn(msg)
+
+    def _log_info(self, msg: str):
+        self.service.log_info(msg)
+
     async def initialize(self):
         logger.info(f"[{PLUGIN_NAME}] 插件已加载，共注册 {len(ALL_ROUTES)} 条指令路由")
 
