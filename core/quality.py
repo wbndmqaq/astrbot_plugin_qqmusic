@@ -61,7 +61,7 @@ def size_new_at(file: dict, idx: int = 0) -> float:
 
 
 def quality_candidates(preferred: str = "flac", fallback: bool = True) -> list[str]:
-    q = (preferred or "flac").lower()
+    q = (preferred or "auto").lower()
     if q in ("auto", "adaptive", "best"):
         return list(QUALITY_LADDER) if fallback else ["flac", "320", "128"]
     idx = (

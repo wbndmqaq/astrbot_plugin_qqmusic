@@ -1,9 +1,52 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
+from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
+
+# ──────────── 裸 #听N 跨插件抢占（共享「最近活跃归属」标记） ────────────
+
+
+def _owner_marker_path() -> Path:
+    """三个音乐插件（网易云/酷狗/QQ）共用的「最近活跃归属」标记文件路径。"""
+    try:
+        from astrbot.api.star import StarTools
+
+        return Path(StarTools.get_data_dir()).parent / "_music_session_owner.json"
+    except Exception:
+        return Path(__file__).resolve().parent.parent / "_music_session_owner.json"
+
+
+def mark_session_owner(plugin_name: str) -> None:
+    """记录某插件为最近一次会话活跃的音乐插件（几十字节小文件，微秒级同步 IO）。"""
+    try:
+        p = _owner_marker_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(
+            json.dumps({"plugin": plugin_name, "ts": int(time.time())}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, p)  # 原子替换，避免并发写坏
+    except Exception:
+        pass
+
+
+def is_session_owner(plugin_name: str) -> bool:
+    """判断某插件是否为最近活跃的音乐插件（无标记时视为 True，退化为「谁有会话谁响应」）。"""
+    try:
+        p = _owner_marker_path()
+        if not p.exists():
+            return True
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data.get("plugin") == plugin_name
+    except Exception:
+        return True
+
 
 # ──────────── 会话存储 ────────────
 
@@ -11,6 +54,20 @@ from urllib.parse import urlparse
 class SessionStore:
     _mem: ClassVar[dict] = {}
     TTL = 600
+    # 内存缓存条数上限：防止大量群/私聊会话长期驻留导致无界增长。
+    # 超过上限时按 updatedAt 淘汰最旧条目（数据已持久化到 KV，淘汰不丢数据）。
+    MAX_MEM = 512
+
+    @classmethod
+    def _evict_if_needed(cls) -> None:
+        if len(cls._mem) <= cls.MAX_MEM:
+            return
+        overflow = len(cls._mem) - cls.MAX_MEM
+        oldest = sorted(
+            cls._mem.items(), key=lambda kv: kv[1].get("updatedAt") or 0
+        )[:overflow]
+        for k, _ in oldest:
+            cls._mem.pop(k, None)
 
     @classmethod
     def _key(cls, scope: str) -> str:
@@ -45,7 +102,10 @@ class SessionStore:
     @classmethod
     async def set(cls, plugin, scope: str, session: dict) -> dict:
         data = {"group_id": scope, "updatedAt": time.time(), **session}
+        cls._evict_if_needed()
         cls._mem[str(scope)] = data
+        # 会话写入即记录本插件为「最近活跃」，供裸 #听N 跨插件抢占
+        mark_session_owner(str(getattr(plugin, "name", "") or ""))
         k = cls._key(scope)
         try:
             import json
@@ -628,7 +688,7 @@ def build_mv_card_data(mv: dict, cfg: dict | None = None) -> dict:
 
 def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
     cfg = cfg or {}
-    quality = (cfg.get("quality") or "flac").upper()
+    quality = (cfg.get("quality") or "auto").upper()
     song_on = cfg.get("enableSongRequest") is not False
     resolve_on = cfg.get("enableResolve") is not False
     if song_on and resolve_on:

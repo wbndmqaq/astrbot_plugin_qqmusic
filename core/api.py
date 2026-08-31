@@ -71,7 +71,29 @@ class ApiError(Exception):
 
 def _get_base() -> str:
     base = normalize_api_base(str(_cfg().get("apiBase") or ""))
-    return base or "http://127.0.0.1:3300"
+    return base
+
+
+# ──────────── 复用 HTTP 会话 ────────────
+
+# 模块级 aiohttp.ClientSession 复用：避免每请求新建会话（反复 TCP 握手 + DNS 解析）。
+# 会话由 service.terminate() 调 close_session() 统一关闭；懒加载，未使用时不会创建。
+_session: aiohttp.ClientSession | None = None
+
+
+def _get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+
+async def close_session() -> None:
+    """关闭并释放复用的 HTTP 会话（插件卸载/重载时由 service 调用）。"""
+    global _session
+    if _session is not None and not _session.closed:
+        await _session.close()
+    _session = None
 
 
 def _get_token() -> str:
@@ -132,6 +154,8 @@ async def request(
 
     params = dict(params or {})
     base = _get_base()
+    if not base:
+        raise ApiError("API 地址未配置：请发送 #qqm api <地址>，或在插件设置面板填写 apiBase")
     url = f"{base}{pathname if pathname.startswith('/') else '/' + pathname}"
     if user_key:
         params["userKey"] = user_key
@@ -147,16 +171,16 @@ async def request(
 
     timeout = aiohttp.ClientTimeout(total=20)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as sess:
-            if method == "get":
-                # GET 参数走 query：规整 bool/None，避免 aiohttp 严格类型校验抛错
-                async with sess.get(
-                    url, params=_query_safe_params(params), headers=headers or None
-                ) as res:
-                    return await _handle_response(res)
-            else:
-                async with sess.post(url, json=params, headers=headers or None) as res:
-                    return await _handle_response(res)
+        sess = _get_session()
+        if method == "get":
+            # GET 参数走 query：规整 bool/None，避免 aiohttp 严格类型校验抛错
+            async with sess.get(
+                url, params=_query_safe_params(params), headers=headers or None, timeout=timeout
+            ) as res:
+                return await _handle_response(res)
+        else:
+            async with sess.post(url, json=params, headers=headers or None, timeout=timeout) as res:
+                return await _handle_response(res)
     except aiohttp.ClientConnectorError as e:
         raise ApiError(f"无法连接 QQ 音乐 API（{base}），请先申请API") from e
     except (aiohttp.InvalidURL, ValueError) as e:
@@ -453,28 +477,27 @@ async def _probe_url_alive(url: str, timeout: int = 6) -> bool:
     }
     # 两阶段：先 HEAD，失败再 Range GET 嗅探首字节
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as sess:
-            try:
-                async with sess.head(
-                    url, headers=headers, allow_redirects=True
-                ) as head:
-                    if 0 < head.status < 400:
-                        return True
-                    if head.status in (401, 403, 404):
-                        return False
-            except Exception:
-                pass
-            headers["Range"] = "bytes=0-1023"
-            async with sess.get(url, headers=headers, allow_redirects=True) as g:
-                if g.status >= 400:
+        sess = _get_session()
+        t = aiohttp.ClientTimeout(total=timeout)
+        try:
+            async with sess.head(
+                url, headers=headers, allow_redirects=True, timeout=t
+            ) as head:
+                if 0 < head.status < 400:
+                    return True
+                if head.status in (401, 403, 404):
                     return False
-                buf = await g.content.read(1024)
-                if len(buf) < 16:
-                    return False
-                head_str = buf[:32].decode("utf-8", errors="ignore").lower()
-                return not ("<html" in head_str or "<!doctype" in head_str)
+        except Exception:
+            pass
+        headers["Range"] = "bytes=0-1023"
+        async with sess.get(url, headers=headers, allow_redirects=True, timeout=t) as g:
+            if g.status >= 400:
+                return False
+            buf = await g.content.read(1024)
+            if len(buf) < 16:
+                return False
+            head_str = buf[:32].decode("utf-8", errors="ignore").lower()
+            return not ("<html" in head_str or "<!doctype" in head_str)
     except Exception:
         return False
 
@@ -489,7 +512,7 @@ async def song_url_best(
     user_key: str = "",
 ) -> dict:
 
-    preferred = (quality or "flac").lower()
+    preferred = (quality or "auto").lower()
     candidate_list = quality_candidates(preferred, fallback)
     real_media = media_id or songmid
     size_info: dict | None = None

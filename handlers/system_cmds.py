@@ -176,7 +176,7 @@ async def toggle(service: MusicService, event: AstrMessageEvent):
 async def set_quality(service: MusicService, event: AstrMessageEvent):
     """#qqm 音质 <档位> 设置最高音质（主人）"""
     m = re.search(
-        r"音质\s*(128|m4a|320|flac|ape|hires|atmos|master|atmos_master)",
+        r"音质\s*(auto|128|m4a|320|flac|ape|hires|atmos|master|atmos_master)",
         event.message_str,
         re.IGNORECASE,
     )
@@ -192,7 +192,7 @@ async def set_quality(service: MusicService, event: AstrMessageEvent):
     await service.reply(
         event,
         f"默认最高音质已设为 {q}\n"
-        "可选: 128 / m4a / 320 / flac / ape / hires / atmos / master / atmos_master",
+        "可选: auto / 128 / m4a / 320 / flac / ape / hires / atmos / master / atmos_master",
     )
     event.stop_event()
 
@@ -246,7 +246,7 @@ ROUTES: list[Route] = [
         admin=True,
     ),
     Route(
-        pattern=r"^#?(qq|QQ)m\s*音质\s*(128|m4a|320|flac|ape|hires|atmos|master|atmos_master)$",
+        pattern=r"^#?(qq|QQ)m\s*音质\s*(auto|128|m4a|320|flac|ape|hires|atmos|master|atmos_master)$",
         name="set_quality",
         doc="#qqm 音质 <档位> 设置最高音质（主人）",
         run=set_quality,

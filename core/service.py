@@ -101,10 +101,13 @@ async def follow_qq_redirect(url: str, max_redirects: int = 5) -> str:
         except Exception:
             return url
         try:
-            async with aiohttp.ClientSession(
+            sess = qqapi._get_session()
+            async with sess.get(
+                current,
+                allow_redirects=False,
                 headers={"User-Agent": qqapi.UA},
                 timeout=aiohttp.ClientTimeout(total=10),
-            ) as sess, sess.get(current, allow_redirects=False) as res:
+            ) as res:
                 if res.status in (301, 302, 303, 307, 308):
                     location = res.headers.get("Location")
                     if not location:
@@ -202,6 +205,13 @@ class MusicService:
         self.config = plugin.config
         qqapi.set_config_getter(lambda: self.config or {})
 
+    # ──────────── 裸 #听N 跨插件抢占 ────────────
+
+    async def is_session_owner(self) -> bool:
+        """本插件是否为最近活跃的音乐插件（供裸 #听N 抢占，标记在 SessionStore.set 写入）。"""
+        name = str(getattr(self.plugin, "name", "") or "")
+        return await asyncio.to_thread(cardlib.is_session_owner, name)
+
     # ──────────── 基础辅助 ────────────
 
     def cfg(self) -> dict:
@@ -276,7 +286,7 @@ class MusicService:
         }
 
     async def resolve_play(self, song: dict, cfg: dict, user_key: str = "") -> dict:
-        quality = cfg.get("quality") or "flac"
+        quality = cfg.get("quality") or "auto"
         fallback = cfg.get("qualityFallback", True) is not False
         try:
             play = await qqapi.song_url_best(
@@ -939,8 +949,8 @@ class MusicService:
 
         play = {
             "url": "",
-            "quality": cfg.get("quality") or "flac",
-            "qualityLabel": self.quality_label(cfg.get("quality") or "flac"),
+            "quality": cfg.get("quality") or "auto",
+            "qualityLabel": self.quality_label(cfg.get("quality") or "auto"),
         }
         if song.get("songmid"):
             try:
@@ -971,7 +981,7 @@ class MusicService:
                         pass
                 play = await qqapi.song_url_best(
                     song["songmid"],
-                    quality=cfg.get("quality") or "flac",
+                    quality=cfg.get("quality") or "auto",
                     media_id=song.get("media_mid") or song.get("songmid"),
                     fallback=cfg.get("qualityFallback", True) is not False,
                     user_key=user_key,
@@ -1173,8 +1183,19 @@ class MusicService:
             t["stopped"] = True
             timer = t.get("timer")
             if timer:
-                timer.cancel()
+                with contextlib.suppress(Exception):
+                    timer.cancel()
+            self._cancel_jobs(t)
             self._active_logins.pop(str(user_id), None)
+
+    def _cancel_jobs(self, task: dict):
+        # 取消已创建但仍在运行的轮询协程/定时器，避免重载/登出后残留对旧 event 发消息
+        for job in task.get("jobs") or []:
+            if job and hasattr(job, "cancel"):
+                try:
+                    job.cancel()
+                except Exception:
+                    pass
 
     def register_task(self, user_id: str, task: dict):
         old = self._active_logins.get(user_id)
@@ -1184,10 +1205,12 @@ class MusicService:
             if t is not None:
                 with contextlib.suppress(Exception):
                     t.cancel()
+            self._cancel_jobs(old)
         self._active_logins[user_id] = task
 
     def pop_task_if_current(self, user_id: str, task: dict):
         if self._active_logins.get(user_id) is task:
+            self._cancel_jobs(task)
             self._active_logins.pop(user_id, None)
 
     async def save_qr_image(self, base64_str: str) -> str:
@@ -1296,8 +1319,19 @@ class MusicService:
             "failStreak": 0,
             "pollCount": 0,
             "pollInterval": poll_interval,
+            "jobs": [],
         }
         self.register_task(user_id, task)
+
+        def _spawn():
+            t = asyncio.create_task(_tick())
+            task["jobs"].append(t)
+            return t
+
+        def _schedule(delay: float):
+            handle = loop.call_later(delay, _spawn)
+            task["jobs"].append(handle)
+            return handle
 
         async def _baseline():
             try:
@@ -1311,7 +1345,7 @@ class MusicService:
             except Exception:
                 task["statusBaseline"] = {"uin": "", "hasKey": False, "login": False}
 
-        asyncio.create_task(_baseline())
+        task["jobs"].append(asyncio.create_task(_baseline()))
 
         loop = asyncio.get_event_loop()
 
@@ -1330,7 +1364,7 @@ class MusicService:
             if task["stopped"]:
                 return
             if task["busy"]:
-                loop.call_later(0.8, lambda: asyncio.create_task(_tick()))
+                _schedule(0.8)
                 return
             elapsed = time.time() - started
             if elapsed > max_sec:
@@ -1466,11 +1500,9 @@ class MusicService:
                 not task["stopped"]
                 and self._active_logins.get(user_id, {}).get("qrcodeID") == qrcode_id
             ):
-                task["timer"] = loop.call_later(
-                    task.get("pollInterval", 2), lambda: asyncio.create_task(_tick())
-                )
+                task["timer"] = _schedule(task.get("pollInterval", 2))
 
-        task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+        task["timer"] = _schedule(2)
 
     def start_webqr_poll(
         self, event: AstrMessageEvent, session_id: str, expires_in: int
@@ -1484,10 +1516,21 @@ class MusicService:
             "stopped": False,
             "busy": False,
             "failStreak": 0,
+            "jobs": [],
         }
         self.register_task(user_id, task)
 
         loop = asyncio.get_event_loop()
+
+        def _spawn():
+            t = asyncio.create_task(_tick())
+            task["jobs"].append(t)
+            return t
+
+        def _schedule(delay: float):
+            handle = loop.call_later(delay, _spawn)
+            task["jobs"].append(handle)
+            return handle
 
         async def _finish_ok(info):
             if task["stopped"]:
@@ -1504,7 +1547,7 @@ class MusicService:
             if task["stopped"]:
                 return
             if task["busy"]:
-                loop.call_later(0.8, lambda: asyncio.create_task(_tick()))
+                _schedule(0.8)
                 return
             if time.time() - started > max_sec:
                 task["stopped"] = True
@@ -1552,11 +1595,9 @@ class MusicService:
                 not task["stopped"]
                 and self._active_logins.get(user_id, {}).get("sessionId") == session_id
             ):
-                task["timer"] = loop.call_later(
-                    task.get("pollInterval", 2), lambda: asyncio.create_task(_tick())
-                )
+                task["timer"] = _schedule(task.get("pollInterval", 2))
 
-        task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+        task["timer"] = _schedule(2)
 
     async def build_status_data(self, user_key: str = "") -> dict:
         cfg = self.cfg()
@@ -1597,7 +1638,7 @@ class MusicService:
             ),
         )
         key = cookie.get("qm_keyst") or cookie.get("qqmusic_key") or ""
-        quality = cfg.get("quality") or "flac"
+        quality = cfg.get("quality") or "auto"
         quality_label = QUALITY_LABEL.get(quality, quality)
 
         nickname = "未登录"
@@ -1895,3 +1936,5 @@ class MusicService:
     async def terminate(self):
         for uid in list(self._active_logins.keys()):
             self.stop_poll(uid)
+        # 关闭复用的 aiohttp 会话，避免热重载后残留连接
+        await qqapi.close_session()

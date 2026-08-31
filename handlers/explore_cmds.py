@@ -398,14 +398,43 @@ async def mv(service: MusicService, event: AstrMessageEvent):
         event.stop_event()
         return
 
-    await service.start_select(
-        event,
-        "mv",
-        rest,
-        label="MV",
-        verb="查看MV",
-        user_key=user_key,
-    )
+    # 裸关键词（无 播放/下载/搜索/分类 动词）默认视为 MV 搜索
+    if not rest:
+        await service.reply(event, "用法：#qqmMV 搜索 关键词")
+        event.stop_event()
+        return
+    try:
+        lst = await qqapi.search_mv(rest, page_size=10, user_key=user_key)
+        if not lst:
+            await service.reply(event, f"没有搜到相关 MV：{rest}")
+            event.stop_event()
+            return
+        await cardlib.SessionStore.set(
+            service.plugin,
+            scope,
+            {
+                "type": "mvList",
+                "data": lst,
+            },
+        )
+        if cfg.get("renderListCard", True):
+            data = cardlib.build_mv_list_card_data(f"MV · {rest}", lst, cfg=cfg)
+            if await service.reply_card_or_text(
+                event,
+                tpl_name="qqmusic-list",
+                data=data,
+                format_text=lambda d: cardlib.format_mv_list_text(lst)
+                + "\n\n发 #qqmMV 播放 / 下载 序号",
+            ):
+                event.stop_event()
+                return
+        await service.reply(
+            event,
+            cardlib.format_mv_list_text(lst) + "\n\n发 #qqmMV 播放 / 下载 序号",
+        )
+    except Exception as err:
+        service.log_warn(f"MV 搜索失败: {err}")
+        await service.reply(event, f"MV 搜索失败：{err}")
     event.stop_event()
 
 
@@ -477,7 +506,7 @@ async def random_song(service: MusicService, event: AstrMessageEvent):
         )
         play = await qqapi.song_url_best(
             song["songmid"],
-            quality=cfg.get("quality") or "flac",
+            quality=cfg.get("quality") or "auto",
             media_id=song.get("media_mid") or song.get("songmid"),
             fallback=cfg.get("qualityFallback", True) is not False,
             user_key=user_key,

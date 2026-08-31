@@ -1,6 +1,15 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v2.0.2] - 投递崩溃修复 + 内存/资源治理 + 流式下载 + 多插件协作
+
+*   **⚡ 内存与资源治理**：`SessionStore` 增加 `MAX_MEM=512` 上限 + `_evict_if_needed()` 按更新时间淘汰最旧条目（修复类级字典慢泄露，数据已持久化不丢）；`api.py` 新增模块级 `_get_session()`/`close_session()` 复用 `ClientSession`，`terminate()` 改为异步并关闭会话。
+*   **🐛 API 未配置明确报错**：`api.py _get_base()` 移除硬编码默认 `127.0.0.1:3300`，后端 API 未配置时请求阶段明确报「API 未配置」，不再静默回退 localhost。
+*   **🔧 音质默认值对齐**：全部 `cfg.get("quality") or "flac"` 统一为 `or "auto"`，与配置面板 schema 默认值一致。
+*   **🚀 流式下载**：`delivery.py download_audio` 改 `iter_chunked(256KB)` 流式分块落盘，降低内存峰值，并补齐失败清理。
+*   **🎯 `#听N` 跨插件归属**：三插件共享「最近活跃归属」标记 `_music_session_owner.json`，裸简写 `#听N` 仅最近活跃的插件响应，带前缀指令始终直接响应，避免多音乐插件同装抢占。
+
+---
 ## [v2.0.1] - 投递辅助方法委托修复（点歌/MV 发送崩溃）
 
 *   **🐛 修复点歌/MV 投递全面崩溃**：v2.0.0 模块化重构后，`delivery.py`（`deliver_song` / `deliver_video`）仍以 `plugin._send_chain` / `plugin._plain` / `plugin._log_warn` / `plugin._log_info` 调用投递辅助方法，但这些方法在重构时已随业务下沉至 `MusicService`（且命名为不带下划线的 `send_chain` / `plain` / `log_warn` / `log_info`），导致 `QQMusicPlugin` 实例上不存在同名属性——`#qqmMV 播放`、点歌、语音、群文件等所有投递路径在发送阶段直接抛 `AttributeError: 'QQMusicPlugin' object has no attribute '_send_chain'`。

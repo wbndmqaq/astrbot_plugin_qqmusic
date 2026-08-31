@@ -311,25 +311,55 @@ async def download_audio(
     file_path = os.path.join(save_dir, f"{safe_name}_{int(time.time() * 1000)}{ext}")
 
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-    async with (
-        aiohttp.ClientSession(timeout=timeout) as sess,
-        sess.get(url, headers=headers, allow_redirects=True) as res,
-    ):
-        if res.status >= 400:
-            raise RuntimeError(f"下载失败 HTTP {res.status}")
-        data = await res.read()
-        if len(data) < 256:
-            raise RuntimeError("下载内容过小，可能是无效链接")
-        head = data[:32].decode("utf-8", errors="ignore").lower()
-        if "<html" in head or "<!doctype" in head:
-            raise RuntimeError("下载内容为 HTML，音频链接已失效")
-        # 音频文件可能较大，写盘放线程池避免阻塞事件循环
-        await asyncio.to_thread(_write_bytes, file_path, data)
-    return {"filePath": file_path, "size": len(data)}
+    size = 0
+    # 确保目标文件不存在（时间戳通常唯一，此处双保险避免 ab 追加到残留文件）
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as sess,
+            sess.get(url, headers=headers, allow_redirects=True) as res,
+        ):
+            if res.status >= 400:
+                raise RuntimeError(f"下载失败 HTTP {res.status}")
+            # 流式分块下载：避免整文件读进内存；每攒 ~1MB 落盘一次（线程池，不阻塞事件循环）
+            pending = bytearray()
+            first_chunk = True
+            async for chunk in res.content.iter_chunked(256 * 1024):
+                if first_chunk:
+                    head = chunk[:32].decode("utf-8", errors="ignore").lower()
+                    if "<html" in head or "<!doctype" in head:
+                        raise RuntimeError("下载内容为 HTML，音频链接已失效")
+                    first_chunk = False
+                size += len(chunk)
+                pending.extend(chunk)
+                if len(pending) >= 1024 * 1024:
+                    await asyncio.to_thread(_append_bytes, file_path, bytes(pending))
+                    pending.clear()
+            if pending:
+                await asyncio.to_thread(_append_bytes, file_path, bytes(pending))
+            if size < 256:
+                raise RuntimeError("下载内容过小，可能是无效链接")
+    except Exception:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        raise
+    return {"filePath": file_path, "size": size}
 
 
 def _write_bytes(path: str, data: bytes):
     with open(path, "wb") as f:
+        f.write(data)
+
+
+def _append_bytes(path: str, data: bytes):
+    with open(path, "ab") as f:
         f.write(data)
 
 
@@ -537,7 +567,7 @@ async def deliver_song(
                                 str(play.get("quality", "")) + str(play.get("url", "")),
                                 re.IGNORECASE,
                             )
-                            else (play.get("quality") or cfg.get("quality") or "flac")
+                            else (play.get("quality") or cfg.get("quality") or "auto")
                         )
                         fresh = await qqapi.song_url_best(
                             song["songmid"],
