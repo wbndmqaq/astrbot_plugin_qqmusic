@@ -5,30 +5,13 @@ import re
 
 from astrbot.api.event import AstrMessageEvent
 
-try:
-    from ..core import api as qqapi
-    from ..core import cards as cardlib
-    from ..core.delivery import deliver_song, send_native_music_card
-    from ..core.service import (
-        PLUGIN_DIR,
-        _PLAY_ALL_LIMIT,
-        _SKIP_ALL,
-        _SKIP_TEXT,
-        MusicService,
-    )
-    from .base import Route
-except (ImportError, ValueError):
-    from core import api as qqapi
-    from core import cards as cardlib
-    from core.delivery import deliver_song, send_native_music_card
-    from core.service import (
-        PLUGIN_DIR,
-        _PLAY_ALL_LIMIT,
-        _SKIP_ALL,
-        _SKIP_TEXT,
-        MusicService,
-    )
-    from handlers.base import Route
+from ..core import api as qqapi
+from ..core import cards as cardlib
+from ..core import messages as msg
+from ..core.delivery import deliver_song, send_native_music_card
+from ..core.service import _PLAY_ALL_LIMIT, _SKIP_ALL, _SKIP_TEXT, MusicService
+from ..core.utils import safe_int
+from .base import Route
 
 
 async def pick_song(service: MusicService, event: AstrMessageEvent):
@@ -45,10 +28,10 @@ async def pick_song(service: MusicService, event: AstrMessageEvent):
         return
     try:
         await service.reply(event, f"正在搜索：{keyword}")
-        page_size = min(int(cfg.get("maxList") or 10), 20)
+        page_size = max(1, min(safe_int(cfg.get("maxList") or 10, 10), 20))
         lst = await qqapi.search_songs(keyword, page_size=page_size)
         if not lst:
-            await service.reply(event, "没有搜到相关歌曲")
+            await service.reply(event, msg.NO_SONG_FOUND)
             return
         try:
             mids = [s["songmid"] for s in lst if s.get("songmid")]
@@ -71,16 +54,9 @@ async def pick_song(service: MusicService, event: AstrMessageEvent):
             scope,
             {"keyword": keyword, "data": lst},
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(keyword, lst, cfg=service.cfg())
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_list_text(lst),
-            ):
-                return
-        await service.reply(event, cardlib.format_list_text(lst))
+        await service.reply_song_list(
+            event, keyword, lst, text_formatter=cardlib.format_list_text
+        )
     except Exception as err:
         service.log_warn(f"点歌失败: {err}")
         await service.reply(event, f"点歌失败：{err}")
@@ -106,77 +82,120 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
     # 裸 #听N（无 qqm 前缀）仅由最近活跃的音乐插件响应，避免多插件同装时抢占顺序取决于加载顺序
     if m and m.group(3) and not await service.is_session_owner():
         return
+    # 显式写了 #qqm（group(3) 为空）却匹配不上会话时不能零响应：裸 #听N 的静默是
+    # 「让位给别的音乐插件」的刻意设计，但显式前缀说明用户就是在用本插件
+    prefixed = bool(m and m.group(3) is None)
+
+    async def _hint(text: str):
+        if prefixed:
+            await service.reply(event, text)
+            event.stop_event()
+
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
     if not session or not session.get("data"):
+        await _hint("列表已过期，请重新 #qqm点歌")
         return
     stype = session.get("type") or "pick"
     if stype == "mvList":
+        await _hint("当前列表是 MV，请用 #qqmMV 播放 序号")
         return
     if want_recommend and stype != "recommend":
+        await _hint("当前列表不是推荐歌单，请先 #qqm推荐")
         return
     if stype == "topCategory":
         await service.reply(event, "该会话是榜单分类，请先 #qqm排行 榜单名 查看歌曲")
         event.stop_event()
         return
     if stype == "albumList":
-        albums = session.get("data") or []
-        if n < 1 or n > len(albums):
-            await service.reply(event, f"请选择 1-{len(albums)}")
-            event.stop_event()
-            return
-        alb = albums[n - 1]
-        try:
-            result = await qqapi.album_songs(
-                alb["albummid"], user_key=service.user_key(event)
-            )
-        except Exception as err:
-            service.log_warn(f"专辑展开失败: {err}")
-            await service.reply(event, f"专辑展开失败：{err}")
-            event.stop_event()
-            return
-        tracks = result.get("list") or []
-        if not tracks:
-            await service.reply(event, "该专辑暂无曲目")
-            event.stop_event()
-            return
-        await service.show_album_tracks(
-            event, alb, tracks, scope, cfg
-        )
-        event.stop_event()
+        await _play_from_album(service, event, cfg, session, scope, n)
         return
     if stype == "recommend":
         await service.expand_recommend(event, session, n)
         return
     if n < 1 or n > len(session["data"]):
-        await service.reply(event, f"请选择 1-{len(session['data'])}")
+        await service.reply(event, msg.out_of_range(len(session["data"])))
         event.stop_event()
         return
     song = session["data"][n - 1]
     user_key = service.user_key(event)
     action = session.get("action") or "play"
     if action != "play":
-        try:
-            _s = dict(session)
-            _s["action"] = "play"
-            await cardlib.SessionStore.set(service.plugin, scope, _s)
-        except Exception:
-            pass
-    if action != "play":
-        try:
-            if action == "lyric":
-                await service.show_lyric(event, song, user_key)
-            elif action == "comment":
-                await service.show_comment(event, song, user_key)
-            elif action == "mv":
-                await service.show_mv(event, song, user_key)
-            else:
-                await service.reply(event, f"未知动作：{action}")
-        except Exception as err:
-            service.log_warn(f"执行失败: {err}")
-            await service.reply(event, f"操作失败：{err}")
+        await _run_pending_action(service, event, session, scope, song, user_key, action)
+        return
+    await _play_resolved(service, event, cfg, session, scope, song, user_key)
+
+
+async def _play_from_album(
+    service: MusicService,
+    event: AstrMessageEvent,
+    cfg: dict,
+    session: dict,
+    scope: str,
+    n: int,
+) -> None:
+    """albumList 会话：按序号取专辑 → 拉曲目 → 专辑曲目卡。"""
+    albums = session.get("data") or []
+    if n < 1 or n > len(albums):
+        await service.reply(event, msg.out_of_range(len(albums)))
         event.stop_event()
         return
+    alb = albums[n - 1]
+    try:
+        result = await qqapi.album_songs(
+            alb["albummid"], user_key=service.user_key(event)
+        )
+    except Exception as err:
+        service.log_warn(f"专辑展开失败: {err}")
+        await service.reply(event, f"专辑展开失败：{err}")
+        event.stop_event()
+        return
+    tracks = result.get("list") or []
+    if not tracks:
+        await service.reply(event, "该专辑暂无曲目")
+        event.stop_event()
+        return
+    await service.show_album_tracks(event, alb, tracks, scope, cfg)
+    event.stop_event()
+
+
+async def _run_pending_action(
+    service: MusicService,
+    event: AstrMessageEvent,
+    session: dict,
+    scope: str,
+    song: dict,
+    user_key: str,
+    action: str,
+) -> None:
+    """一次性动作（#qqm评论 选歌）：先复位会话为播放，再执行对应动作。"""
+    try:
+        _s = dict(session)
+        _s["action"] = "play"
+        await cardlib.SessionStore.set(service.plugin, scope, _s)
+    except Exception:
+        pass
+    try:
+        if action == "comment":
+            await service.show_comment(event, song, user_key)
+        else:
+            await service.reply(event, f"未知动作：{action}")
+    except Exception as err:
+        service.log_warn(f"执行失败: {err}")
+        await service.reply(event, f"操作失败：{err}")
+    event.stop_event()
+
+
+async def _play_resolved(
+    service: MusicService,
+    event: AstrMessageEvent,
+    cfg: dict,
+    session: dict,
+    scope: str,
+    song: dict,
+    user_key: str,
+) -> None:
+    """普通播放：详情卡 + 投递；无播放链时退回原生音乐卡。"""
     play = await service.resolve_play(song, cfg, user_key)
     mv_vid = play.get("mvVid") or ""
     if mv_vid and session.get("data"):
@@ -197,8 +216,8 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
         song,
         play,
         cfg=service.cfg(),
-        plugin_dir=PLUGIN_DIR,
         options=_SKIP_TEXT,
+        user_key=user_key,
     )
     event.stop_event()
 
@@ -220,6 +239,10 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
     if not session or not session.get("data"):
+        # 显式 #qqm听所有 却无会话时不能零响应（裸 #听所有 保持静默让位）
+        if re.match(r"^#?(?:qq|QQ)m", event.message_str.strip(), re.IGNORECASE):
+            await service.reply(event, "列表已过期，请重新 #qqm点歌")
+            event.stop_event()
         return
     stype = session.get("type") or "pick"
     if stype in ("mvList", "topCategory", "albumList", "recommend"):
@@ -244,16 +267,24 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
                     f"连播 {i + 1}/{len(batch)} 无播放链: {song.get('songName')}"
                 )
                 continue
-            await deliver_song(
+            r = await deliver_song(
                 service.plugin,
                 event,
                 song,
                 play,
                 cfg=cfg,
-                plugin_dir=PLUGIN_DIR,
                 options=_SKIP_ALL,
+                user_key=user_key,
             )
-            ok += 1
+            # 投递层返回真实结果（语音/文件两条通道都没发出去时 ok=False）：
+            # 原先无条件 ok += 1，导致「连播完成：成功 N 首」虚高
+            if r.get("ok"):
+                ok += 1
+            else:
+                fail += 1
+                service.log_warn(
+                    f"连播 {i + 1}/{len(batch)} 投递失败: {song.get('songName')}"
+                )
         except Exception as err:
             fail += 1
             service.log_warn(f"连播 {i + 1}/{len(batch)} 失败: {err}")
@@ -279,7 +310,7 @@ async def play_direct(service: MusicService, event: AstrMessageEvent):
     try:
         lst = await qqapi.search_songs(keyword, page_size=1)
         if not lst:
-            await service.reply(event, "没有搜到相关歌曲")
+            await service.reply(event, msg.NO_SONG_FOUND)
             event.stop_event()
             return
         song = lst[0]
@@ -299,8 +330,8 @@ async def play_direct(service: MusicService, event: AstrMessageEvent):
             song,
             play,
             cfg=service.cfg(),
-            plugin_dir=PLUGIN_DIR,
             options=_SKIP_TEXT,
+            user_key=user_key,
         )
     except Exception as err:
         await service.reply(event, f"播放失败：{err}")

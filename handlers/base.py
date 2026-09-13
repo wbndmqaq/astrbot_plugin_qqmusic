@@ -8,9 +8,9 @@ AstrBot 通过 handler.__module__ 与插件主模块做【精确匹配】来绑�
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -23,13 +23,16 @@ class Route:
     admin: bool = False
     priority: int = 0
     event_message_type: Any = None
-    extras: dict = field(default_factory=dict)
 
 
 def install(cls, flt, module_path: str, routes: list[Route]) -> int:
     """把路由安装到插件类上，返回安装数量。
 
     flt 为 astrbot.api.event.filter 子模块。
+
+    priority 必须挂在**第一个**装饰器上：AstrBot 的 get_handler_or_create() 以
+    ``__module__`` + ``__name__`` 为键，第二次调用发现已注册就直接返回旧元数据，
+    之后传入的 kwargs 会被静默丢弃——所以 admin 路由的 priority 原先全部失效。
     """
     installed = 0
     for route in routes:
@@ -43,7 +46,9 @@ def install(cls, flt, module_path: str, routes: list[Route]) -> int:
         handler.__module__ = module_path
 
         if route.admin:
-            handler = flt.permission_type(flt.PermissionType.ADMIN)(handler)
+            handler = flt.permission_type(
+                flt.PermissionType.ADMIN, priority=route.priority
+            )(handler)
 
         if route.event_message_type is not None:
             handler = flt.event_message_type(

@@ -2,22 +2,13 @@ from __future__ import annotations
 
 from astrbot.api.event import AstrMessageEvent, filter
 
-try:
-    from ..core.service import (
-        MusicService,
-        collect_message_text,
-        is_plugin_command_msg,
-        is_qqmusic_message,
-    )
-    from .base import Route
-except (ImportError, ValueError):
-    from core.service import (
-        MusicService,
-        collect_message_text,
-        is_plugin_command_msg,
-        is_qqmusic_message,
-    )
-    from handlers.base import Route
+from ..core.service import (
+    MusicService,
+    collect_message_text,
+    is_plugin_command_msg,
+    is_qqmusic_message,
+)
+from .base import Route
 
 
 async def resolve(service: MusicService, event: AstrMessageEvent):

@@ -148,54 +148,54 @@
     <div class="card">
       <div class="hero">
         <div class="cover-wrap">
-          {{if data.cover}}
-          <img src="{{data.cover}}" referrerpolicy="no-referrer" />
-          {{else}}
+          {% if data.cover %}
+          <img src="{{ data.cover }}" referrerpolicy="no-referrer" />
+          {% else %}
           <div class="ph">♪</div>
-          {{/if}}
+          {% endif %}
         </div>
         <div class="info">
           <div class="tag-row">
-            {{if data.qualityLabel}}<div class="tag">{{data.qualityLabel}}</div>{{/if}}
-            {{if data.showPay}}{{if data.payplay}}<div class="tag pay">付费</div>{{else}}<div class="tag">免费</div>{{/if}}{{/if}}
-            {{if data.source}}<div class="tag">{{data.source}}</div>{{/if}}
+            {% if data.qualityLabel %}<div class="tag">{{ data.qualityLabel }}</div>{% endif %}
+            {% if data.showPay %}{% if data.payplay %}<div class="tag pay">付费</div>{% else %}<div class="tag">免费</div>{% endif %}{% endif %}
+            {% if data.source %}<div class="tag">{{ data.source }}</div>{% endif %}
           </div>
-          <div class="song-name">{{data.songName || '未知'}}</div>
-          <div class="song-artist">{{data.singerName || '未知歌手'}}</div>
-          {{if data.albumName}}<div class="song-album">专辑：{{data.albumName}}</div>{{/if}}
+          <div class="song-name">{{ ('未知' if not data.songName else data.songName) }}</div>
+          <div class="song-artist">{{ ('未知歌手' if not data.singerName else data.singerName) }}</div>
+          {% if data.albumName %}<div class="song-album">专辑：{{ data.albumName }}</div>{% endif %}
         </div>
       </div>
 
       <div class="body">
         <div class="meta-grid">
-          {{if data.duration}}
+          {% if data.duration %}
           <div class="meta-item">
             <div class="meta-label">时长</div>
-            <div class="meta-value">{{data.duration}}</div>
+            <div class="meta-value">{{ data.duration }}</div>
           </div>
-          {{/if}}
-          {{if data.albumName}}
+          {% endif %}
+          {% if data.albumName %}
           <div class="meta-item">
             <div class="meta-label">专辑</div>
-            <div class="meta-value small">{{data.albumName}}</div>
+            <div class="meta-value small">{{ data.albumName }}</div>
           </div>
-          {{/if}}
-          {{if data.qualityLabel}}
+          {% endif %}
+          {% if data.qualityLabel %}
           <div class="meta-item">
             <div class="meta-label">音质</div>
-            <div class="meta-value">{{data.qualityLabel}}</div>
+            <div class="meta-value">{{ data.qualityLabel }}</div>
           </div>
-          {{/if}}
-          {{if data.source}}
+          {% endif %}
+          {% if data.source %}
           <div class="meta-item">
             <div class="meta-label">来源</div>
-            <div class="meta-value">{{data.source}}</div>
+            <div class="meta-value">{{ data.source }}</div>
           </div>
-          {{/if}}
+          {% endif %}
         </div>
 
         <div class="tips">
-          <strong>♪</strong> {{data.tip || '发送 #qqm听序号 播放当前列表中的歌曲'}}
+          <strong>♪</strong> {{ ('发送 #qqm听序号 播放当前列表中的歌曲' if not data.tip else data.tip) }}
         </div>
 
         <div class="footer">

@@ -1,6 +1,46 @@
 # 更新日志 (CHANGELOG)
 
 ---
+## [v2.0.3] - 2026-09-12
+
+### 🐛 缺陷修复
+
+- **`#qqm点歌`/`#qqmMV 搜索/分类` 全部抛 TypeError**：`reply_song_list` 统一双参调用文本兜底 formatter，而 `format_list_text`/`format_mv_list_text` 是单参签名——核心指令在卡片渲染前就崩。两个 formatter 补可选第二参。
+- **分享链接解析被截断（播错歌）**：源码里把正则写成 `[^\\s，…]`（非 raw 字符串的转义笔误），字符类实际排除的是**字母 s**；修正为 `[^\s，…]`。
+- **分享卡片解析对 aiocqhttp 恒失效**：`Json` 组件用 `str(dict)` 无法通过 `json.loads`；改 `json.dumps(..., ensure_ascii=False)`。
+- **扫码成功后所有回执丢失**：`_cancel_jobs()` 把正在执行的 `_tick` 一并取消，登录成功提示发不出去；跳过当前 task。
+- **登录轮询过期判定读了死参数**：`_tick` 用通道常量（900/180s）而非按二维码真实有效期收敛的 `ctx.max_sec`。
+- **下载失败重试丢 `user_key`**：刷新播放链退回「默认账号」取链，已登录用户被提示去登录；全链路透传。
+- **`#qqmMV 下载` 失败对同一 URL 下载两次**：只保留受限平台路径的一次重试。
+- **ffmpeg 超时留半成品文件**：异常路径就地删除，不再堆积临时目录。
+- **评论点赞数为字符串崩整卡**：`str > int` 抛 `TypeError`；统一转 int。
+- **`send_chain` 只捕获 `AttributeError`**：平台侧失败穿透 handler、卡片被拒不回退纯文本；现返回是否发出并保留降级链。
+- **`#qqm歌词` 链接分支缺失**：整条 URL 被当关键词搜索必然失败；补齐解析（含 c6.y.qq.com 短链跟随重定向）。
+- **`#qqmMV 播放/下载` 写法失效**：会被解析成 `vid="/下载"`；改为分别书写「播放 序号」「下载 序号」。
+- **榜单查询 KeyError**：`topId` 空值守卫并明确提示。
+- **原生/自定义音乐卡发不出去**：`event.platform` 无发送接口；统一改走 `event.bot.call_action` 直发 `music` 段。
+- **跨插件「最近活跃」标记失效**：`StarTools.get_data_dir()` 反查不到插件名；显式传插件名。
+- **DeepLink 绑定/导入谎报登录成功**：复用 `pick_login_success()` 校验 uin/hasKey 后才回调，失败给明确提示。
+- **配置写盘「假成功」**：旧版 `await None` 兼容 + 新版提交返回值校验，统一 `MusicService.save_config()`。
+- **模板未开 autoescape 导致 HTML 注入**：已开启。
+- **卸载/重载临时文件永久残留**：清理定时器按「句柄 → 待删路径」登记、取消时补删；`keepFileSec` 兜底 120 → 60 与 schema 一致。
+- **取消后台任务后立即关会话**：先 `gather` 等任务跑完清理分支；`download_audio` 捕获 `CancelledError` 并删除半截文件。
+- **登录轮询 jobs 无界增长**：900s 轮询堆积约 450 个句柄/任务；新增 `_prune_jobs()`，句柄改存 `task["timer"]`。
+- **会话存储三处缺陷**：淘汰时机在插入前（上限 +1）、KV 命中不回填内存、并发写互相覆盖——分别修正。
+- **渲染环境缺失逐卡重试启动**：失败后短路，同进程直接回退文本；装好环境重载即恢复。
+- **base64 直发无体积上限**：加 150MB 护栏，超大文件改走文件通道。
+- **`#qqm热搜` 不受总开关影响**：已在 schema 描述中写明。
+- **零碎修正**：`#qqm设置` 主人命令清单与帮助卡同源（措辞漂移消除）；`README` 安装步骤插件名错误；`panels._on_off` 提模块级；`save_qr_image` 死参数；logo 首读移线程池。
+
+### 🧩 其他改动
+
+- `core/api.py` 拆分为按域包 `core/api/`（逐符号比对零丢失）；歌曲详情字段提取三处实现统一为 `api.extract_track_meta`（含 `master_tape_media_mid`、`track.media_mid` 等并集链）。
+- 大函数拆分：`deliver_song`/`deliver_video`（投递）、`_drive_poll`/`_qr_poll_once`（登录轮询参数化骨架）、`build_status_data`/`build_settings_data`（状态/设置卡）、`get_lyric`/`chart`/`choose_song`（handlers），分支与行为不变。
+- 设置卡命令清单改为与帮助卡同源（`messages.HELP_SECTIONS` 的「账号状态 + 主人管理」），消除两份清单的措辞漂移。
+- 8 套模板直接改写标准 Jinja2（`tpl_adapter.py` 删除），编译/渲染线程池化 + `wrap_card_data()` 缺键安全；临时目录固定 `data/plugin_data/astrbot_plugin_qqmusic/temp`（`tempDir` 移除）+ 启动扫地。
+- 会话不再把上游原始对象 `raw` 写进 KV（收藏/日推最多 100 条不再双份占用）；移除 40 余处导入脚手架与 5 个无调用门面成员；复用常驻 Chromium 与 HTTP 会话。
+- 文档：README 补齐 23 项配置说明与 API 端前置条件表（`QQMUSIC_API_TOKEN` / IP 白名单 / 默认端口 3300 / 限流）；用户可见文案的「MQTT」改为「备用通道」；`enable` 描述补 `#qqm热搜`；行数与模块名口径修正。
+
 ## [v2.0.2] - 投递崩溃修复 + 内存/资源治理 + 流式下载 + 多插件协作
 
 *   **⚡ 内存与资源治理**：`SessionStore` 增加 `MAX_MEM=512` 上限 + `_evict_if_needed()` 按更新时间淘汰最旧条目（修复类级字典慢泄露，数据已持久化不丢）；`api.py` 新增模块级 `_get_session()`/`close_session()` 复用 `ClientSession`，`terminate()` 改为异步并关闭会话。
@@ -98,9 +138,8 @@
 
 *   **📋 指令描述全覆盖**: 34/36 个 handler 缺失 docstring（WebUI 指令列表显示「无描述」）全部补齐，
     现有 2 个 + 新增 34 个，覆盖点歌/发现/MV/解析/登录/管理全部分区。
-*   **🧪 测试基建**: 新增 `test_commands.py`（本地桩 aiohttp/astrbot，`python test_commands.py` 直接运行），
-    169 项覆盖命令路由正则、链接/卡片解析、音质降级提示、平台检测（含分片上传能力判定）、配置 schema、
-    文件名清洗、`_play_view` 归一化、handler docstring 全覆盖。
+*   **🧪 测试基建**: 本地测试脚本（桩 aiohttp/astrbot，覆盖命令路由正则、链接/卡片解析、音质降级提示、
+    平台检测、配置 schema、文件名清洗、handler docstring 等）未随仓库提供，需在本地自建后运行。
 *   **🐛 修复**: `#qqm 测试` 连通测试指令无法触发——正则 `^#?(qqm测试|qq音乐测试)$` 缺 `\s*`，
     与 README/帮助文档写的 `#qqm 测试`（带空格）不一致；改为兼容 `#qqm测试` / `#qqm 测试` / `#qqm ping`。
 *   **🧹 死代码清理**: `SessionStore.set` 的 `ttl_sec` 参数从未使用（`get` 走 `cls.TTL`）、
@@ -110,7 +149,7 @@
 *   **✨ 全仓 ruff 零告警**: 清理 29 处 E501（ruff 按显示宽度计，CJK 双宽——中文长字符串/注释折行、
     嵌套三元平铺、UA 长串拼接）；顺带 17 处非 E501（SIM105→`contextlib.suppress`、E741→`l` 改 `ln`、
     E731→lambda 改 def、S311/S701→noqa 注释、B904→`raise from`、SIM108→三元）。
-    `ruff check .` 全绿；`test_commands.py` 用 `[lint.per-file-ignores]` 豁免测试断言长行。
+    `ruff check .` 全绿（规则集见仓库根 `ruff.toml`）。
 
 ---
 ## [v1.7.0] - 对齐 JS 版语音压缩/禁用高清语音/音质降级提示/链接解析加固
@@ -188,7 +227,7 @@
 *   **修复**: 移除已废弃的 `@register` 装饰器（版本号与 metadata 不一致），改为 AstrBot 自动识别插件类。
 *   **清理**: 删除死代码——`updater._mask_remote`、`quality.SIZE_NEW_INDEX`/`is_quality_available`/`summarize_file_sizes`、`api` 中 5 个无调用函数（`singer_album`/`album_detail`/`user_songlists`/`user_collect_songlists`/`cgi_proxy`）、`cards.format_settings_text`、`delivery.build_music_filename` 的 `ascii_only`/`include_quality` 死参数、`main._get_local_version` 重复实现等。
 *   **重构**: 重构多处运算符优先级石山（`albummid`/`cover`/`payplay`/`creator` 三元嵌套）、`recommend_feed`/`personal_radio` 重复取值链、`_handle_resolve` 专辑/歌单 songs 重复构造、`deliver_song` 语音/文件发送分支冗余。
-*   **工具**: 接入 ruff（新增 `ruff.toml`，豁免插件防御性写法 BLE001/S110）；修复 70 处 lint（含 async 内阻塞写盘改 `asyncio.to_thread`、类级可变默认加 `ClassVar`、`re.I` 统一 `re.IGNORECASE` 等），全量 `ruff format` 格式化。`ruff check` / `ruff format --check` 双零告警。
+*   **工具**: 接入 ruff（仓库不提供独立配置文件，插件防御性写法 BLE001/S110 以 `# noqa` 逐处豁免）；修复 70 处 lint（含 async 内阻塞写盘改 `asyncio.to_thread`、类级可变默认加 `ClassVar`、`re.I` 统一 `re.IGNORECASE` 等），全量 `ruff format` 格式化。`ruff check` 零告警（规则集见仓库根 `ruff.toml`；BLE001/S110 属插件刻意的防御性宽捕获，未纳入选择）。
 *   **优化**: 帮助/设置/README 命令表同步精简后的登录命令（`#qqm登录` / `#qqm登录微信` / `#qqm登录qq`）。
 
 ---

@@ -340,57 +340,57 @@
             <div class="title">使用帮助</div>
             <div class="subtitle">点歌 · 解析 · 登录 · 管理 · 一图掌握</div>
           </div>
-          <div class="version-pill">{{data.version || 'v1.3.0'}}</div>
+          <div class="version-pill">{{ ('v?' if not data.version else data.version) }}</div>
         </div>
         <div class="hero-stats">
           <div class="stat">
-            <div class="stat-num">{{data.statCommands || '12+'}}</div>
+            <div class="stat-num">{{ ('—' if not data.statCommands else data.statCommands) }}</div>
             <div class="stat-label">指令能力</div>
           </div>
           <div class="stat">
-            <div class="stat-num">{{data.statQuality || 'Hi-Res'}}</div>
+            <div class="stat-num">{{ ('Hi-Res' if not data.statQuality else data.statQuality) }}</div>
             <div class="stat-label">最高音质</div>
           </div>
           <div class="stat">
-            <div class="stat-num">{{data.statMode || '全功能'}}</div>
+            <div class="stat-num">{{ ('全功能' if not data.statMode else data.statMode) }}</div>
             <div class="stat-label">运行模式</div>
           </div>
         </div>
       </div>
 
       <div class="body">
-        {{each data.sections section}}
+        {% for section in data.sections %}
         <div class="section">
           <div class="section-head">
             <div class="section-dot"></div>
-            <div class="section-title">{{section.title}}</div>
-            {{if section.tag}}
-            <div class="section-tag">{{section.tag}}</div>
-            {{/if}}
+            <div class="section-title">{{ section.title }}</div>
+            {% if section.tag %}
+            <div class="section-tag">{{ section.tag }}</div>
+            {% endif %}
           </div>
           <div class="cmd-list">
-            {{each section.items item}}
+            {% for item in section['items'] %}
             <div class="cmd">
               <div class="cmd-main">
-                <div class="cmd-name">{{item.name}}</div>
-                <div class="cmd-desc">{{item.desc}}</div>
+                <div class="cmd-name">{{ item.name }}</div>
+                <div class="cmd-desc">{{ item.desc }}</div>
               </div>
-              {{if item.example}}
-              <div class="cmd-example">{{item.example}}</div>
-              {{/if}}
+              {% if item.example %}
+              <div class="cmd-example">{{ item.example }}</div>
+              {% endif %}
             </div>
-            {{/each}}
+            {% endfor %}
           </div>
         </div>
-        {{/each}}
+        {% endfor %}
 
         <div class="tips">
           <div class="tips-title"><span>!</span>小提示</div>
-          <div class="tips-body">{{data.tip || '付费曲需主人扫码登录；指令统一 #qqm 前缀；#听序号 仅在本群点歌会话有效；分享 QQ 音乐卡片/链接可自动解析。'}}</div>
+          <div class="tips-body">{{ ('付费曲需主人扫码登录；指令统一 #qqm 前缀；#听序号 仅在本群点歌会话有效；分享 QQ 音乐卡片/链接可自动解析。' if not data.tip else data.tip) }}</div>
         </div>
 
         <div class="footer">
-          <div class="footer-left">{{data.apiHint || 'API 已对接'}}</div>
+          <div class="footer-left">{{ ('API 已对接' if not data.apiHint else data.apiHint) }}</div>
           <div class="footer-right">astrbot_plugin_qqmusic</div>
         </div>
       </div>

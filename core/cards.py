@@ -1,22 +1,36 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
+
+from . import messages as msg
+from .messages import HELP_SECTIONS
+from .utils import safe_int
+
+PLUGIN_NAME = "astrbot_plugin_qqmusic"
 
 # ──────────── 裸 #听N 跨插件抢占（共享「最近活跃归属」标记） ────────────
 
 
 def _owner_marker_path() -> Path:
-    """三个音乐插件（网易云/酷狗/QQ）共用的「最近活跃归属」标记文件路径。"""
+    """三个音乐插件（网易云/酷狗/QQ）共用的「最近活跃归属」标记文件路径。
+
+    必须显式传插件名：StarTools 只在调用栈位于插件主模块（main.py）时才能反查
+    插件元数据，本函数在 core/cards.py 里，不传名会抛 RuntimeError 并回退到
+    「插件自身目录」——那样三个插件各写各的，跨插件抢占就永远不生效。
+    """
     try:
         from astrbot.api.star import StarTools
 
-        return Path(StarTools.get_data_dir()).parent / "_music_session_owner.json"
+        data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        return data_dir.parent / "_music_session_owner.json"
     except Exception:
         return Path(__file__).resolve().parent.parent / "_music_session_owner.json"
 
@@ -52,7 +66,12 @@ def is_session_owner(plugin_name: str) -> bool:
 
 
 class SessionStore:
+    # scope -> 会话数据的内存缓存。类级（进程内共享）而非实例级：会话本就按 scope
+    # （群/私聊）寻址，同一份数据又以相同 key 持久化在 KV 里，共享缓存与 KV 视图
+    # 天然一致；单实例加载下与实例级无差别，多实例并存也只是各持一份同内容缓存。
     _mem: ClassVar[dict] = {}
+    # 落盘串行化锁：保证同 scope（乃至全局）KV 写入顺序与调用顺序一致
+    _write_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     TTL = 600
     # 内存缓存条数上限：防止大量群/私聊会话长期驻留导致无界增长。
     # 超过上限时按 updatedAt 淘汰最旧条目（数据已持久化到 KV，淘汰不丢数据）。
@@ -88,31 +107,77 @@ class SessionStore:
             raw = await plugin.get_kv_data(k, None)
             if raw:
                 if isinstance(raw, str):
-                    import json
-
                     raw = json.loads(raw)
+                if not isinstance(raw, dict):
+                    return None
                 ts = raw.get("updatedAt") or 0
                 if time.time() - ts < cls.TTL:
+                    # 命中 KV 回填内存，避免同一会话每次仍读 KV
+                    cls._mem[str(scope)] = raw
+                    cls._evict_if_needed()
                     return raw
                 await plugin.delete_kv_data(k)
         except Exception:
             pass
         return None
 
+    @staticmethod
+    def _strip_raw(session: dict) -> dict:
+        """剥离会话里冗余的 ``raw``（上游原始对象）后再入库。
+
+        ``raw`` 只有投递链的 ``play`` 会读（见 ``resolve._fail_hint``），会话数据没人读；
+        而收藏/推荐类会话最多 100 条，带 ``raw`` 时整条会话会被原样 ``json.dumps`` 写进 KV，
+        并在 ``_mem`` 里再留一份 —— 内存与 KV 双份占用。
+        """
+        # 覆盖两层：列表值（data/songs 等曲目列表）与字典值（playlist/singer 等本身就是
+        # 带 raw 的上游对象）。更深的嵌套（字典里再套列表）当前没有会话使用，不做递归。
+        cleaned = {}
+        changed = False
+        for key, value in session.items():
+            if isinstance(value, list):
+                new_list = [
+                    {k: v for k, v in item.items() if k != "raw"}
+                    if isinstance(item, dict) and "raw" in item
+                    else item
+                    for item in value
+                ]
+                if any(a is not b for a, b in zip(new_list, value)):
+                    changed = True
+                cleaned[key] = new_list
+            elif isinstance(value, dict) and "raw" in value:
+                cleaned[key] = {k: v for k, v in value.items() if k != "raw"}
+                changed = True
+            else:
+                cleaned[key] = value
+        return cleaned if changed else session
+
     @classmethod
     async def set(cls, plugin, scope: str, session: dict) -> dict:
-        data = {"group_id": scope, "updatedAt": time.time(), **session}
-        cls._evict_if_needed()
+        # updatedAt 必须放在 **session 之后：调用方常传入 dict(旧会话)（内含旧 updatedAt），
+        # 若放在前面会被旧值覆盖，导致「读→改→写回」不推进时间戳、会话从首次创建起计时过期。
+        data = {"group_id": scope, **cls._strip_raw(session), "updatedAt": time.time()}
         cls._mem[str(scope)] = data
+        # 插入后淘汰，保证 _mem 容量严格不超 MAX_MEM
+        cls._evict_if_needed()
         # 会话写入即记录本插件为「最近活跃」，供裸 #听N 跨插件抢占
-        mark_session_owner(str(getattr(plugin, "name", "") or ""))
+        # 标记文件写盘（mkdir + write + os.replace）是阻塞 IO，且每次会话写入都会走：
+        # 与读侧 service.is_session_owner 保持一致，放线程池执行。
+        await asyncio.to_thread(
+            mark_session_owner, str(getattr(plugin, "name", "") or "")
+        )
         k = cls._key(scope)
-        try:
-            import json
-
-            await plugin.put_kv_data(k, json.dumps(data, ensure_ascii=False))
-        except Exception:
-            pass
+        # 写盘串行化：等锁期间本次数据可能已被更新的一次写入取代（内存里 updatedAt
+        # 更大），此时直接跳过本次旧值，避免 KV 被旧值覆盖
+        async with cls._write_lock:
+            try:
+                cur = cls._mem.get(str(scope))
+                if cur is not None and (cur.get("updatedAt") or 0) > (
+                    data.get("updatedAt") or 0
+                ):
+                    return data
+                await plugin.put_kv_data(k, json.dumps(data, ensure_ascii=False))
+            except Exception:
+                pass
         return data
 
 
@@ -176,7 +241,7 @@ def format_song_list(lst: list, title: str) -> str:
     return "\n".join(lines)
 
 
-def format_list_text(lst: list) -> str:
+def format_list_text(lst: list, title: str = "") -> str:
     lines = []
     for i, s in enumerate(lst):
         pay = " [付费]" if s.get("payplay") else ""
@@ -190,13 +255,13 @@ def format_list_text(lst: list) -> str:
     )
 
 
-def format_mv_list_text(lst: list) -> str:
+def format_mv_list_text(lst: list, title: str = "") -> str:
     lines = []
     for i, m in enumerate(lst):
         name = m.get("mvtitle") or m.get("name") or m.get("songName") or "未知"
         singer = m.get("singerName") or "未知"
         lines.append(f"{i + 1}. {name} - {singer}")
-    return "♫ MV 搜索结果（发 #qqmMV 播放 / 下载 序号）\n" + "\n".join(lines)
+    return f"♫ MV 搜索结果（{msg.MV_LIST_HINT}）\n" + "\n".join(lines)
 
 
 def _fmt_count(n) -> str:
@@ -294,7 +359,7 @@ def format_status_text(data: dict) -> str:
             data.get("vipExpireText") or "",
             f"API: {data.get('apiBase')}",
             f"Key: {data.get('keyStatus')}",
-            "" if data.get("loggedIn") else "发送 #qqm登录 扫码绑定",
+            "" if data.get("loggedIn") else msg.SCAN_LOGIN_HINT,
         ]
     ).rstrip()
 
@@ -334,7 +399,10 @@ def build_list_card_data(
         default_commands.append(
             {
                 "name": "#qqmMV 播放 序号",
-                "desc": "播放 / 下载该曲 MV（列表带 🎬 即是有 MV 的歌曲）",
+                "desc": (
+                    "播放该曲 MV（下载用 #qqmMV 下载 序号；"
+                    "列表带 🎬 即是有 MV 的歌曲）"
+                ),
                 "example": "#qqmMV 播放 1",
             }
         )
@@ -364,7 +432,6 @@ def build_list_card_data(
             }
             for i, s in enumerate(songs)
         ],
-        "hasMv": has_mv,
         "commands": commands,
     }
 
@@ -374,7 +441,7 @@ def build_mv_list_card_data(
 ) -> dict:
     """MV 列表卡片：复用 qqmusic-list 模板，MV 字段映射为列表条目。
 
-    序号与 #qqmMV 播放/下载 序号 对应；封面/时长沿用 MV 数据。
+    序号与 #qqmMV 播放 序号 / #qqmMV 下载 序号 对应；封面/时长沿用 MV 数据。
     """
     cfg = cfg or {}
     songs = []
@@ -549,7 +616,9 @@ def build_comment_card_data(
                 or "",
                 "avatarPh": str(nick)[:1] if nick != "匿名" else "匿",
                 "time": format_comment_time(c.get("time")),
-                "likes": c.get("praisenum") or c.get("likeCount") or 0,
+                # 上游计数可能是字符串，而模板要跟 0 做大小比较（str > int 抛 TypeError，
+                # 会让整张评论卡渲染失败退化成纯文本），这里统一转成 int。
+                "likes": safe_int(c.get("praisenum") or c.get("likeCount") or 0, 0),
                 "content": content,
                 "hot": bool(c.get("is_hot") or c.get("is_hot_cmt")),
             }
@@ -575,8 +644,14 @@ def build_delivery_tip(
     has_url: bool = False,
     degrade_note: str = "",
     error: str = "",
+    no_vocal: bool = False,
 ) -> str:
-    """生成基于当前配置的动态提示文案：精准反映当前会发送什么（语音 / 群文件 / 原生卡 / 自定义卡）"""
+    """生成基于当前配置的动态提示文案：精准反映当前会发送什么（语音 / 群文件 / 原生卡 / 自定义卡）。
+
+    no_vocal：当前平台出站不支持语音（``delivery._NO_VOCAL_PLATFORMS``，如 weixin_oc）。
+    这类平台即使 ``sendVocal`` 开着也发不出语音，tip 必须按「实际会发什么」生成，
+    否则会与现实相反地显示「正在发送语音（128）…」。
+    """
     cfg = cfg or {}
     if not has_url:
         if error:
@@ -584,24 +659,26 @@ def build_delivery_tip(
         return "未获取到播放链接，请 #qqm登录"
 
     q = quality_label or "默认音质"
-    send_vocal = cfg.get("sendVocal") is not False
+    want_vocal = cfg.get("sendVocal") is not False
     upload_file = cfg.get("uploadFile") is not False
     send_native = bool(cfg.get("sendNativeCard"))
     send_custom = bool(cfg.get("sendCustomCard"))
 
     actions = []
-    if send_vocal:
+    if want_vocal and not no_vocal:
         actions.append("语音")
     if upload_file:
         actions.append("群文件")
     if send_native or send_custom:
         actions.append("音乐卡片")
 
-    main = (
-        f"正在发送{' + '.join(actions)}（{q}）..."
-        if actions
-        else f"已获取播放链接（{q}）"
-    )
+    if actions:
+        main = f"正在发送{' + '.join(actions)}（{q}）..."
+    elif no_vocal and want_vocal:
+        # 语音被平台排除、又没开群文件/音乐卡：实际什么都不发，如实说明
+        main = msg.NO_VOCAL_NO_FILE_HINT
+    else:
+        main = f"已获取播放链接（{q}）"
     if degrade_note:
         main += f" · {degrade_note}"
     return main
@@ -619,6 +696,7 @@ def build_detail_card_data(
     degrade_note="",
     error="",
     cfg: dict | None = None,
+    no_vocal: bool = False,
 ) -> dict:
     is_vip = bool(song.get("payplay")) or payplay
 
@@ -635,8 +713,9 @@ def build_detail_card_data(
         has_url=has_url,
         degrade_note=degrade_note,
         error=error,
+        no_vocal=no_vocal,
     )
-    mv_hint = f" · 🎬 该曲有 MV：#qqmMV 播放/下载 直接操作" if mv_vid else ""
+    mv_hint = " · 🎬 该曲有 MV：#qqmMV 播放 或 #qqmMV 下载 直接操作" if mv_vid else ""
 
     return {
         "songName": song.get("songName") or "未知",
@@ -667,7 +746,7 @@ def build_mv_card_data(mv: dict, cfg: dict | None = None) -> dict:
     tip_parts = [
         f"累计播放 {_fmt_count(play)}" if play else "",
         f"发行 {pubdate}" if pubdate else "",
-        "发 #qqmMV 播放/下载 序号",
+        msg.MV_LIST_HINT,
     ]
     return {
         "songName": title,
@@ -679,14 +758,18 @@ def build_mv_card_data(mv: dict, cfg: dict | None = None) -> dict:
         "payplay": False,
         "showPay": False,  # 不显示 付费/免费 徽章
         "source": "MV",
-        "tip": " · ".join(x for x in tip_parts if x) or "发 #qqmMV 播放/下载 序号",
-        "vid": mv.get("vid") or "",
-        "listennum": play,
-        "apiHint": api_hint_for(cfg),
+        "tip": " · ".join(x for x in tip_parts if x) or msg.MV_LIST_HINT,
     }
 
 
-def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
+def build_help_card_data(
+    cfg: dict | None = None, version: str = "?", command_count: int | None = None
+) -> dict:
+    """帮助卡片数据。
+
+    command_count 由调用方传入真实路由数（``len(handlers.ALL_ROUTES)``），
+    不再硬编码一个与实现漂移的假数字。
+    """
     cfg = cfg or {}
     quality = (cfg.get("quality") or "auto").upper()
     song_on = cfg.get("enableSongRequest") is not False
@@ -701,7 +784,7 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
         stat_mode = "待机"
     return {
         "version": f"v{version}",
-        "statCommands": "30+",
+        "statCommands": str(command_count) if command_count else "",
         "statQuality": quality,
         "statMode": stat_mode,
         "apiHint": api_hint_for(cfg),
@@ -709,209 +792,22 @@ def build_help_card_data(cfg: dict | None = None, version: str = "?") -> dict:
             "付费曲需主人扫码登录；指令统一 #qqm 前缀；"
             "#听序号 仅在本群点歌会话有效；分享 QQ 音乐卡片/链接可自动解析。"
         ),
-        "sections": [
-            {
-                "title": "点歌播放",
-                "tag": "全员",
-                "items": [
-                    {
-                        "name": "搜索点歌",
-                        "desc": "按关键词搜索并展示列表",
-                        "example": "#qqm点歌 七里香",
-                    },
-                    {
-                        "name": "选择曲目",
-                        "desc": "播放当前列表第 N 首",
-                        "example": "#qqm听1",
-                    },
-                    {
-                        "name": "连播列表",
-                        "desc": "依次发送当前列表全部歌曲（上限 30 首）",
-                        "example": "#qqm听所有",
-                    },
-                    {
-                        "name": "直接播放",
-                        "desc": "搜索并立即播放第一条",
-                        "example": "#qqm播放 晴天",
-                    },
-                    {
-                        "name": "查看歌词",
-                        "desc": "按歌名/mid 取歌词；点歌后 #qqm歌词1 取列表第 1 首歌词",
-                        "example": "#qqm歌词 七里香",
-                    },
-                    {
-                        "name": "热搜榜",
-                        "desc": "查看 QQ 音乐热搜",
-                        "example": "#qqm热搜",
-                    },
-                ],
-            },
-            {
-                "title": "MV 专区",
-                "tag": "视频",
-                "items": [
-                    {
-                        "name": "MV 搜索",
-                        "desc": "搜索 MV 并展示列表",
-                        "example": "#qqmMV 搜索 周杰伦",
-                    },
-                    {
-                        "name": "MV 播放",
-                        "desc": "播放列表第 N 个 MV（无参数=本曲 MV）",
-                        "example": "#qqmMV 播放 1",
-                    },
-                    {
-                        "name": "MV 下载",
-                        "desc": "下载列表第 N 个 MV",
-                        "example": "#qqmMV 下载 1",
-                    },
-                    {
-                        "name": "MV 分类",
-                        "desc": "按分类 / 标签浏览 MV",
-                        "example": "#qqmMV",
-                    },
-                ],
-            },
-            {
-                "title": "发现音乐",
-                "tag": "探索",
-                "items": [
-                    {
-                        "name": "排行榜",
-                        "desc": "查看各大榜单歌曲",
-                        "example": "#qqm排行 飙升",
-                    },
-                    {
-                        "name": "新歌速递",
-                        "desc": "最新歌曲（1内地 2欧美 3日本 4韩国 5最新 6港台）",
-                        "example": "#qqm新歌",
-                    },
-                    {
-                        "name": "推荐歌单",
-                        "desc": "热门推荐歌单列表",
-                        "example": "#qqm推荐",
-                    },
-                    {
-                        "name": "打开推荐歌单",
-                        "desc": "查看第 N 个推荐歌单的歌曲",
-                        "example": "#qqm推荐听1",
-                    },
-                    {
-                        "name": "随机推荐",
-                        "desc": "随机推荐一首歌并播放",
-                        "example": "#qqm来首歌",
-                    },
-                    {
-                        "name": "个性电台",
-                        "desc": "根据口味推荐 5 首",
-                        "example": "#qqm电台",
-                    },
-                    {
-                        "name": "每日推荐",
-                        "desc": "每日推荐歌曲（需登录）",
-                        "example": "#qqm日推",
-                    },
-                    {
-                        "name": "我的收藏",
-                        "desc": "查看收藏歌曲（需登录）",
-                        "example": "#qqm收藏",
-                    },
-                    {
-                        "name": "歌手搜索",
-                        "desc": "搜索歌手并展示热门歌曲",
-                        "example": "#qqm歌手 周杰伦",
-                    },
-                    {
-                        "name": "专辑搜索",
-                        "desc": "搜索专辑并展示曲目列表",
-                        "example": "#qqm专辑 叶惠美",
-                    },
-                    {
-                        "name": "歌单搜索",
-                        "desc": "搜索歌单并展示歌曲",
-                        "example": "#qqm歌单 华语流行",
-                    },
-                    {
-                        "name": "歌曲评论",
-                        "desc": "查看歌曲热门评论",
-                        "example": "#qqm评论 晴天",
-                    },
-                ],
-            },
-            {
-                "title": "账号状态",
-                "tag": "登录",
-                "items": [
-                    {
-                        "name": "无感扫码",
-                        "desc": "主通道：一张 QQ 码覆盖 QQ / QQ音乐 App",
-                        "example": "#qqm登录",
-                    },
-                    {
-                        "name": "微信扫码",
-                        "desc": "无感扫码（微信码，备用）",
-                        "example": "#qqm登录微信",
-                    },
-                    {
-                        "name": "App 扫码",
-                        "desc": "QQ音乐 App 扫码（备用通道）",
-                        "example": "#qqm登录qq",
-                    },
-                    {
-                        "name": "状态卡片",
-                        "desc": "账号 / 会员 / 音质 可视化",
-                        "example": "#qqm状态",
-                    },
-                    {"name": "快捷状态", "desc": "状态卡短指令", "example": "#qms"},
-                    {"name": "登出解绑", "desc": "清除登录态", "example": "#qqm登出"},
-                ],
-            },
-            {
-                "title": "主人管理",
-                "tag": "Master",
-                "items": [
-                    {
-                        "name": "查看配置",
-                        "desc": "API、开关、音质与发送方式",
-                        "example": "#qqm设置",
-                    },
-                    {
-                        "name": "设置 API",
-                        "desc": "修改接口地址",
-                        "example": "#qqm api <地址>",
-                    },
-                    {
-                        "name": "切换音质",
-                        "desc": "128 / 320 / flac / hires …",
-                        "example": "#qqm 音质 flac",
-                    },
-                    {
-                        "name": "功能开关",
-                        "desc": "开启或关闭点歌、解析",
-                        "example": "#qqm 开启点歌",
-                    },
-                    {
-                        "name": "连通测试",
-                        "desc": "探测 API 是否可用",
-                        "example": "#qqm 测试",
-                    },
-                ],
-            },
-            {
-                "title": "智能解析",
-                "tag": "自动",
-                "items": [
-                    {
-                        "name": "分享卡片",
-                        "desc": "群内 QQ 音乐分享自动识别",
-                        "example": "（发送音乐卡片）",
-                    },
-                    {
-                        "name": "链接解析",
-                        "desc": "y.qq.com 链接自动取链播放",
-                        "example": "https://y.qq.com/…",
-                    },
-                ],
-            },
-        ],
+        "sections": deepcopy(HELP_SECTIONS),
     }
+
+
+def format_help_text(data: dict) -> str:
+    """帮助卡片的纯文本兜底：与卡片共用同一份 sections 数据，两份清单不会再漂移。"""
+    lines = [f"【QQ音乐插件帮助】{data.get('version') or ''}".rstrip(), ""]
+    for section in data.get("sections") or []:
+        lines.append(f"— {section.get('title') or ''} —")
+        for item in section.get("items") or []:
+            name = item.get("name") or ""
+            desc = item.get("desc") or ""
+            example = item.get("example") or ""
+            lines.append(f"{example}  {name}：{desc}" if example else f"{name}：{desc}")
+        lines.append("")
+    for tail in (data.get("tip") or "", data.get("apiHint") or ""):
+        if tail:
+            lines.append(tail)
+    return "\n".join(x for x in lines).strip()

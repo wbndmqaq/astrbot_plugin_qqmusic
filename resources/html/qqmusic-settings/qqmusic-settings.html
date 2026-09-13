@@ -423,23 +423,23 @@
           <div class="brand-mark">⚙</div>
           <div class="hero-text">
             <div class="eyebrow">QQ MUSIC SETTINGS</div>
-            <div class="title">{{data.title || '插件设置'}}</div>
-            <div class="subtitle">{{data.subtitle || '运行配置 · 一图掌握'}}</div>
+            <div class="title">{{ ('插件设置' if not data.title else data.title) }}</div>
+            <div class="subtitle">{{ ('运行配置 · 一图掌握' if not data.subtitle else data.subtitle) }}</div>
           </div>
-          <div class="version-pill">{{data.loginOk ? '已登录' : '未登录'}}</div>
+          <div class="version-pill">{{ ('已登录' if data.loginOk else '未登录') }}</div>
         </div>
         <div class="hero-stats">
           <div class="stat">
-            <div class="stat-num">{{data.quality || 'AUTO'}}</div>
+            <div class="stat-num">{{ ('AUTO' if not data.quality else data.quality) }}</div>
             <div class="stat-label">当前音质</div>
           </div>
           <div class="stat">
-            <div class="stat-num">{{data.loginOk ? '在线' : '离线'}}</div>
+            <div class="stat-num">{{ ('在线' if data.loginOk else '离线') }}</div>
             <div class="stat-label">登录状态</div>
           </div>
           <div class="stat">
-            <div class="stat-num">锅巴</div>
-            <div class="stat-label">详细配置</div>
+            <div class="stat-num">{{ (0 if not data.switchOn else data.switchOn) }}/{{ (0 if not data.switchTotal else data.switchTotal) }}</div>
+            <div class="stat-label">开关开启</div>
           </div>
         </div>
       </div>
@@ -452,12 +452,12 @@
             <div class="section-tag">状态</div>
           </div>
           <div class="tiles">
-            {{each data.tiles t}}
+            {% for t in data.tiles %}
             <div class="tile">
-              <div class="tile-val {{t.on ? 'on' : 'off'}}">{{t.value}}</div>
-              <div class="tile-lab">{{t.label}}</div>
+              <div class="tile-val {{ ('on' if t.on else 'off') }}">{{ t.value }}</div>
+              <div class="tile-lab">{{ t.label }}</div>
             </div>
-            {{/each}}
+            {% endfor %}
           </div>
         </div>
 
@@ -468,12 +468,12 @@
             <div class="section-tag">配置</div>
           </div>
           <div class="rows">
-            {{each data.rows r}}
+            {% for r in data.rows %}
             <div class="row">
-              <div class="k">{{r.k}}</div>
-              <div class="v">{{r.v}}</div>
+              <div class="k">{{ r.k }}</div>
+              <div class="v">{{ r.v }}</div>
             </div>
-            {{/each}}
+            {% endfor %}
           </div>
         </div>
 
@@ -484,25 +484,25 @@
             <div class="section-tag">快捷</div>
           </div>
           <div class="cmd-list">
-            {{each data.commands c}}
+            {% for c in data.commands %}
             <div class="cmd">
               <div class="cmd-main">
-                <div class="cmd-name">{{c.name}}</div>
-                <div class="cmd-desc">{{c.desc || ''}}</div>
+                <div class="cmd-name">{{ c.name }}</div>
+                <div class="cmd-desc">{{ ('' if not c.desc else c.desc) }}</div>
               </div>
-              <div class="cmd-example">{{c.example}}</div>
+              <div class="cmd-example">{{ c.example }}</div>
             </div>
-            {{/each}}
+            {% endfor %}
           </div>
         </div>
 
         <div class="tips">
           <div class="tips-title"><span>!</span>小提示</div>
-          <div class="tips-body">{{data.tip || '详细开关可在锅巴面板修改；付费曲需主人 #qqm登录 扫码绑定 Cookie'}}</div>
+          <div class="tips-body">{{ ('详细开关可在 AstrBot 管理面板修改；付费曲需主人 #qqm登录 扫码绑定' if not data.tip else data.tip) }}</div>
         </div>
 
         <div class="footer">
-          <div class="footer-left">{{data.apiHint || 'API 已对接'}}</div>
+          <div class="footer-left">{{ ('API 已对接' if not data.apiHint else data.apiHint) }}</div>
           <div class="footer-right">astrbot_plugin_qqmusic</div>
         </div>
       </div>

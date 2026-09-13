@@ -5,18 +5,12 @@ import re
 
 from astrbot.api.event import AstrMessageEvent
 
-try:
-    from ..core import api as qqapi
-    from ..core import cards as cardlib
-    from ..core.delivery import deliver_song
-    from ..core.service import PLUGIN_DIR, MusicService
-    from .base import Route
-except (ImportError, ValueError):
-    from core import api as qqapi
-    from core import cards as cardlib
-    from core.delivery import deliver_song
-    from core.service import PLUGIN_DIR, MusicService
-    from handlers.base import Route
+from ..core import api as qqapi
+from ..core import cards as cardlib
+from ..core import messages as msg
+from ..core.delivery import deliver_song
+from ..core.service import MusicService
+from .base import Route
 
 
 async def chart(service: MusicService, event: AstrMessageEvent):
@@ -31,74 +25,92 @@ async def chart(service: MusicService, event: AstrMessageEvent):
     scope = service.scope(event)
     user_key = service.user_key(event)
     if not keyword:
-        try:
-            groups = await qqapi.top_category(user_key)
-            if not groups:
-                await service.reply(event, "获取排行榜失败")
-                event.stop_event()
-                return
-            all_tops = []
-            lines = ["♫ QQ音乐排行榜"]
-            for g in groups:
-                lines.append(f"【{g.get('title', '')}】")
-                for t in g.get("list") or []:
-                    all_tops.append({**t, "group": g.get("title")})
-                    lines.append(
-                        f"  {t.get('label', '')}（#qqm排行 {t.get('label', '')}）"
-                    )
-            lines.append("\n发送 #qqm排行 榜单名 查看具体榜单")
-            await cardlib.SessionStore.set(
-                service.plugin,
-                scope,
-                {
-                    "type": "topCategory",
-                    "data": all_tops,
-                },
-            )
-            await service.reply(event, "\n".join(lines))
-        except Exception as err:
-            service.log_warn(f"排行失败: {err}")
-            await service.reply(event, "排行失败，请稍后重试")
-        event.stop_event()
-        return
+        await _chart_overview(service, event, scope, user_key)
+    else:
+        await _chart_detail(service, event, scope, user_key, keyword)
+    event.stop_event()
+
+
+async def _chart_overview(
+    service: MusicService, event: AstrMessageEvent, scope: str, user_key: str
+) -> None:
+    """#qqm排行（无参）：分组列出全部榜单，写入 topCategory 会话供 #qqm歌词N 识别。"""
+    try:
+        groups = await qqapi.top_category(user_key)
+        if not groups:
+            await service.reply(event, "获取排行榜失败")
+            event.stop_event()
+            return
+        all_tops = []
+        lines = ["♫ QQ音乐排行榜"]
+        for g in groups:
+            lines.append(f"【{g.get('title', '')}】")
+            for t in g.get("list") or []:
+                all_tops.append({**t, "group": g.get("title")})
+                lines.append(f"  {t.get('label', '')}（#qqm排行 {t.get('label', '')}）")
+        lines.append("\n发送 #qqm排行 榜单名 查看具体榜单")
+        await cardlib.SessionStore.set(
+            service.plugin,
+            scope,
+            {"type": "topCategory", "data": all_tops},
+        )
+        await service.reply(event, "\n".join(lines))
+    except Exception as err:
+        service.log_warn(f"排行失败: {err}")
+        await service.reply(event, msg.TOP_FAIL_HINT)
+
+
+def _match_top(all_tops: list, keyword: str) -> dict | None:
+    """榜单匹配：label 包含 → label 被包含 → topId 精确。"""
+    return (
+        next((t for t in all_tops if t.get("label") and keyword in t["label"]), None)
+        or next((t for t in all_tops if t.get("label") and t["label"] in keyword), None)
+        or next(
+            (t for t in all_tops if t.get("topId") and str(t["topId"]) == keyword),
+            None,
+        )
+    )
+
+
+async def _chart_detail(
+    service: MusicService,
+    event: AstrMessageEvent,
+    scope: str,
+    user_key: str,
+    keyword: str,
+) -> None:
+    """#qqm排行 榜单名：匹配榜单 → 取曲目 → 归一化入会话 → 列表卡。"""
     try:
         groups = await qqapi.top_category(user_key)
         all_tops = [t for g in groups for t in (g.get("list") or [])]
-        match = (
-            next(
-                (t for t in all_tops if t.get("label") and keyword in t["label"]),
-                None,
-            )
-            or next(
-                (t for t in all_tops if t.get("label") and t["label"] in keyword),
-                None,
-            )
-            or next(
-                (
-                    t
-                    for t in all_tops
-                    if t.get("topId") and str(t["topId"]) == keyword
-                ),
-                None,
-            )
-        )
+        match = _match_top(all_tops, keyword)
         if not match:
-            names = "、".join(
-                t.get("label", "") for t in all_tops if t.get("label")
-            )[:200]
+            names = "、".join(t.get("label", "") for t in all_tops if t.get("label"))[:200]
             await service.reply(event, f"未找到「{keyword}」\n可用榜单：{names}")
             event.stop_event()
             return
+        # 按 label 匹配到的条目不保证带 topId（只有第三个分支校验过），缺了就退回报错
+        top_id = match.get("topId")
+        if not top_id:
+            await service.reply(event, f"榜单「{match.get('label') or keyword}」缺少 ID，无法查询")
+            event.stop_event()
+            return
         await service.reply(event, f"正在获取 {match.get('label')}...")
-        detail = await qqapi.top_detail(match["topId"], user_key=user_key)
+        detail = await qqapi.top_detail(top_id, user_key=user_key)
         if isinstance(detail, dict):
-            songs_raw = (
-                detail.get("list") or (detail.get("data") or {}).get("list") or []
-            )
+            songs_raw = detail.get("list") or (detail.get("data") or {}).get("list") or []
         else:
             songs_raw = []
-        songs = [service.normalize_song(s, i) for i, s in enumerate(songs_raw or [])]
-        songs = [s for s in songs if s]
+        # 归一化统一走 api.normalize_track_item（全仓唯一一份实现）：字段链比原先的
+        # MusicService.normalize_song 更全（含 album.pic/cover 封面兜底、file.media_mid
+        # 兜底），榜单列表卡封面不再可能为空、取链档位不再退化
+        songs = [
+            n
+            for n in (
+                qqapi.normalize_track_item(s, i) for i, s in enumerate(songs_raw or [])
+            )
+            if n
+        ]
         if not songs:
             await service.reply(event, "该榜单暂无数据")
             event.stop_event()
@@ -106,32 +118,12 @@ async def chart(service: MusicService, event: AstrMessageEvent):
         await cardlib.SessionStore.set(
             service.plugin,
             scope,
-            {
-                "type": "top",
-                "data": songs,
-            },
+            {"type": "top", "data": songs},
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(
-                match.get("label", ""), songs, cfg=service.cfg()
-            )
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(
-                    songs, match.get("label", "")
-                ),
-            ):
-                event.stop_event()
-                return
-        await service.reply(
-            event, cardlib.format_song_list(songs, match.get("label", ""))
-        )
+        await service.reply_song_list(event, match.get("label", ""), songs)
     except Exception as err:
         service.log_warn(f"排行失败: {err}")
-        await service.reply(event, "排行失败，请稍后重试")
-    event.stop_event()
+        await service.reply(event, msg.TOP_FAIL_HINT)
 
 
 async def new_songs(service: MusicService, event: AstrMessageEvent):
@@ -163,25 +155,196 @@ async def new_songs(service: MusicService, event: AstrMessageEvent):
                 "data": songs,
             },
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(title, songs, cfg=cfg)
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(songs, title),
-            ):
-                event.stop_event()
-                return
-        await service.reply(event, cardlib.format_song_list(songs, title))
+        await service.reply_song_list(event, title, songs)
     except Exception as err:
         service.log_warn(f"新歌失败: {err}")
         await service.reply(event, "新歌速递获取失败，请稍后重试")
     event.stop_event()
 
 
+async def _mv_search(
+    service: MusicService, event: AstrMessageEvent, *, keyword: str, scope: str, user_key: str, missing_hint: str
+) -> None:
+    """MV 搜索并写会话（动词「搜索」与裸关键词共用，仅空结果文案不同）。"""
+    try:
+        lst = await qqapi.search_mv(keyword, page_size=10, user_key=user_key)
+        if not lst:
+            await service.reply(event, missing_hint)
+            event.stop_event()
+            return
+        await cardlib.SessionStore.set(
+            service.plugin,
+            scope,
+            {
+                "type": "mvList",
+                "data": lst,
+            },
+        )
+        await service.reply_song_list(
+            event,
+            f"MV · {keyword}",
+            lst,
+            text_suffix="\n\n" + msg.MV_LIST_HINT,
+            text_formatter=cardlib.format_mv_list_text,
+            card_builder=cardlib.build_mv_list_card_data,
+        )
+    except Exception as err:
+        service.log_warn(f"MV 搜索失败: {err}")
+        await service.reply(event, msg.mv_search_fail(err))
+    event.stop_event()
+
+
+async def _mv_play_or_download(
+    service: MusicService, event: AstrMessageEvent, *, arg_text: str, is_dl: bool, scope: str, user_key: str
+) -> None:
+    """动词「播放/下载」：解析 序号 / vid / 本曲 MV 三种来源并投递。"""
+    session = await cardlib.SessionStore.get(service.plugin, scope)
+    mv_obj = None
+    if not arg_text:
+        last_vid = (session or {}).get("lastMvVid") or ""
+        if last_vid:
+            mv_obj = {
+                "vid": last_vid,
+                "mvtitle": "本曲 MV",
+                "name": "本曲 MV",
+                "singerName": "",
+            }
+        else:
+            await service.reply(
+                event,
+                "用法：#qqmMV 播放 序号 或 #qqmMV 下载 序号（也可直接给 vid）；"
+                "点歌后再发 #qqmMV 播放 可直接操作该曲 MV",
+            )
+            event.stop_event()
+            return
+    elif re.fullmatch(r"\d+", arg_text):
+        n = int(arg_text)
+        if not session or not session.get("data"):
+            await service.reply(event, "请先 #qqm点歌 / #qqmMV 搜索 出列表")
+            event.stop_event()
+            return
+        if n < 1 or n > len(session["data"]):
+            await service.reply(event, msg.out_of_range(len(session["data"])))
+            event.stop_event()
+            return
+        if session.get("type") in ("topCategory", "recommend"):
+            await service.reply(
+                event,
+                msg.SESSION_TOP_CATEGORY_HINT
+                if session.get("type") == "topCategory"
+                else msg.SESSION_RECOMMEND_HINT,
+            )
+            event.stop_event()
+            return
+        if session.get("type") == "mvList":
+            mv_obj = session["data"][n - 1]
+        else:
+            song = session["data"][n - 1]
+            song_vid = song.get("mvVid") or ""
+            if not song_vid:
+                await service.reply(event, msg.NO_MV_HINT)
+                event.stop_event()
+                return
+            mv_obj = {
+                "vid": song_vid,
+                "mvtitle": song.get("songName") or "本曲 MV",
+                "name": song.get("songName") or "本曲 MV",
+                "singerName": song.get("singerName") or "",
+                "cover": song.get("cover") or "",
+            }
+    else:
+        mv_obj = {
+            "vid": arg_text,
+            "mvtitle": arg_text,
+            "name": arg_text,
+            "singerName": "",
+        }
+
+    await service.deliver_mv(event, mv_obj, download=is_dl, user_key=user_key)
+    event.stop_event()
+
+
+async def _mv_category(
+    service: MusicService, event: AstrMessageEvent, *, cat_rest: str, scope: str, user_key: str
+) -> None:
+    """动词「分类」：无参列出分类，带 序号/分类名 浏览该类 MV。"""
+    try:
+        cats = await qqapi.mv_category(user_key)
+    except Exception as err:
+        service.log_warn(f"MV 分类失败: {err}")
+        cats = {"area": [], "version": [], "list": []}
+    all_cats = (
+        (cats.get("area") or [])
+        + (cats.get("version") or [])
+        + (cats.get("list") or [])
+    )
+    if not all_cats:
+        await service.reply(event, "没有获取到 MV 分类")
+        event.stop_event()
+        return
+    if not cat_rest:
+        lines = ["♫ MV 分类"]
+        for i, t in enumerate(all_cats):
+            lines.append(f"{i + 1}. {t.get('name') or t.get('title') or ''}")
+        lines.append("\n发送 #qqmMV 分类 序号 或 #qqmMV 分类 分类名 浏览该类 MV")
+        await service.reply(event, "\n".join(lines))
+        event.stop_event()
+        return
+    try:
+        idx = int(cat_rest) - 1
+        tag = (
+            all_cats[idx] if (idx >= 0 and idx < len(all_cats)) else None
+        )
+    except (ValueError, TypeError):
+        tag = next(
+            (
+                t
+                for t in all_cats
+                if cat_rest
+                in str(t.get("name") or t.get("title") or "")
+            ),
+            None,
+        )
+    if not tag:
+        await service.reply(event, f"未找到分类「{cat_rest}」")
+        event.stop_event()
+        return
+    try:
+        res = await qqapi.mv_by_tag(
+            tag.get("id") or tag.get("tagId"),
+            page_size=20,
+            user_key=user_key,
+        )
+        lst = res.get("list") or []
+        if not lst:
+            await service.reply(event, "该分类暂无 MV")
+            event.stop_event()
+            return
+        await cardlib.SessionStore.set(
+            service.plugin,
+            scope,
+            {
+                "type": "mvList",
+                "data": lst,
+            },
+        )
+        shown = lst[:15]
+        await service.reply_song_list(
+            event,
+            f"MV 分类 · {tag.get('name') or tag.get('title') or ''}",
+            shown,
+            text_suffix="\n\n" + msg.MV_LIST_HINT,
+            text_formatter=cardlib.format_mv_list_text,
+            card_builder=cardlib.build_mv_list_card_data,
+        )
+    except Exception as err:
+        service.log_warn(f"MV 分类浏览失败: {err}")
+        await service.reply(event, f"MV 分类浏览失败：{err}")
+    event.stop_event()
+
+
 async def mv(service: MusicService, event: AstrMessageEvent):
-    """MV：搜索 / 播放 / 下载 / 分类浏览"""
+    """MV：搜索 / 播放 / 下载 / 分类浏览（按动词分发到 _mv_* 助手）"""
     cfg = service.cfg()
     if not cfg.get("enable", True) or cfg.get("enableSongRequest") is False:
         return
@@ -197,205 +360,29 @@ async def mv(service: MusicService, event: AstrMessageEvent):
     verb_match = re.match(r"^(播放|下载|搜索)[:：]?\s*(.*)$", rest)
     verb = verb_match.group(1) if verb_match else ""
     arg_text = (verb_match.group(2).strip() if verb_match else rest).strip()
-    is_play = verb == "播放"
-    is_dl = verb == "下载"
-    is_search = verb == "搜索"
 
-    if is_search:
+    if verb == "搜索":
         if not arg_text:
             await service.reply(event, "用法：#qqmMV 搜索 关键词")
             event.stop_event()
             return
-        try:
-            lst = await qqapi.search_mv(arg_text, page_size=10, user_key=user_key)
-            if not lst:
-                await service.reply(event, "没有搜到相关 MV")
-                event.stop_event()
-                return
-            await cardlib.SessionStore.set(
-                service.plugin,
-                scope,
-                {
-                    "type": "mvList",
-                    "data": lst,
-                },
-            )
-            if cfg.get("renderListCard", True):
-                data = cardlib.build_mv_list_card_data(f"MV · {arg_text}", lst, cfg=cfg)
-                if await service.reply_card_or_text(
-                    event,
-                    tpl_name="qqmusic-list",
-                    data=data,
-                    format_text=lambda d: cardlib.format_mv_list_text(lst)
-                    + "\n\n发 #qqmMV 播放 / 下载 序号",
-                ):
-                    event.stop_event()
-                    return
-            await service.reply(
-                event,
-                cardlib.format_mv_list_text(lst)
-                + "\n\n发 #qqmMV 播放 / 下载 序号",
-            )
-        except Exception as err:
-            service.log_warn(f"MV 搜索失败: {err}")
-            await service.reply(event, f"MV 搜索失败：{err}")
-        event.stop_event()
+        await _mv_search(
+            service, event, keyword=arg_text, scope=scope, user_key=user_key,
+            missing_hint="没有搜到相关 MV",
+        )
         return
 
-    if is_play or is_dl:
-        session = await cardlib.SessionStore.get(service.plugin, scope)
-        mv_obj = None
-        if not arg_text:
-            last_vid = (session or {}).get("lastMvVid") or ""
-            if last_vid:
-                mv_obj = {
-                    "vid": last_vid,
-                    "mvtitle": "本曲 MV",
-                    "name": "本曲 MV",
-                    "singerName": "",
-                }
-            else:
-                await service.reply(
-                    event,
-                    "用法：#qqmMV 播放/下载 序号 或 vid；"
-                    "点歌后再发 #qqmMV 播放/下载 可直接操作该曲 MV",
-                )
-                event.stop_event()
-                return
-        elif re.fullmatch(r"\d+", arg_text):
-            n = int(arg_text)
-            if not session or not session.get("data"):
-                await service.reply(event, "请先 #qqm点歌 / #qqmMV 搜索 出列表")
-                event.stop_event()
-                return
-            if n < 1 or n > len(session["data"]):
-                await service.reply(event, f"请选择 1-{len(session['data'])}")
-                event.stop_event()
-                return
-            if session.get("type") in ("topCategory", "recommend"):
-                await service.reply(
-                    event,
-                    "当前是榜单分类列表，请先 #qqm排行 榜单名 列出歌曲"
-                    if session.get("type") == "topCategory"
-                    else "当前是推荐歌单列表，请先 #qqm推荐听序号 列出歌曲",
-                )
-                event.stop_event()
-                return
-            if session.get("type") == "mvList":
-                mv_obj = session["data"][n - 1]
-            else:
-                song = session["data"][n - 1]
-                song_vid = song.get("mvVid") or ""
-                if not song_vid:
-                    await service.reply(event, "该曲没有 MV")
-                    event.stop_event()
-                    return
-                mv_obj = {
-                    "vid": song_vid,
-                    "mvtitle": song.get("songName") or "本曲 MV",
-                    "name": song.get("songName") or "本曲 MV",
-                    "singerName": song.get("singerName") or "",
-                    "cover": song.get("cover") or "",
-                }
-        else:
-            mv_obj = {
-                "vid": arg_text,
-                "mvtitle": arg_text,
-                "name": arg_text,
-                "singerName": "",
-            }
-
-        await service.deliver_mv(event, mv_obj, download=is_dl, user_key=user_key)
-        event.stop_event()
+    if verb in ("播放", "下载"):
+        await _mv_play_or_download(
+            service, event, arg_text=arg_text, is_dl=verb == "下载",
+            scope=scope, user_key=user_key,
+        )
         return
 
     if rest.startswith("分类"):
-        cat_rest = rest[len("分类") :].strip()
-        try:
-            cats = await qqapi.mv_category(user_key)
-        except Exception as err:
-            service.log_warn(f"MV 分类失败: {err}")
-            cats = {"area": [], "version": [], "list": []}
-        all_cats = (
-            (cats.get("area") or [])
-            + (cats.get("version") or [])
-            + (cats.get("list") or [])
+        await _mv_category(
+            service, event, cat_rest=rest[len("分类"):].strip(), scope=scope, user_key=user_key
         )
-        if not all_cats:
-            await service.reply(event, "没有获取到 MV 分类")
-            event.stop_event()
-            return
-        if not cat_rest:
-            lines = ["♫ MV 分类"]
-            for i, t in enumerate(all_cats):
-                lines.append(f"{i + 1}. {t.get('name') or t.get('title') or ''}")
-            lines.append("\n发送 #qqmMV 分类 序号 或 #qqmMV 分类 分类名 浏览该类 MV")
-            await service.reply(event, "\n".join(lines))
-            event.stop_event()
-            return
-        try:
-            idx = int(cat_rest) - 1
-            tag = (
-                all_cats[idx] if (idx >= 0 and idx < len(all_cats)) else None
-            )
-        except (ValueError, TypeError):
-            tag = next(
-                (
-                    t
-                    for t in all_cats
-                    if cat_rest
-                    in str(t.get("name") or t.get("title") or "")
-                ),
-                None,
-            )
-        if not tag:
-            await service.reply(event, f"未找到分类「{cat_rest}」")
-            event.stop_event()
-            return
-        try:
-            res = await qqapi.mv_by_tag(
-                tag.get("id") or tag.get("tagId"),
-                page_size=20,
-                user_key=user_key,
-            )
-            lst = res.get("list") or []
-            if not lst:
-                await service.reply(event, "该分类暂无 MV")
-                event.stop_event()
-                return
-            await cardlib.SessionStore.set(
-                service.plugin,
-                scope,
-                {
-                    "type": "mvList",
-                    "data": lst,
-                },
-            )
-            shown = lst[:15]
-            if cfg.get("renderListCard", True):
-                data = cardlib.build_mv_list_card_data(
-                    f"MV 分类 · {tag.get('name') or tag.get('title') or ''}",
-                    shown,
-                    cfg=cfg,
-                )
-                if await service.reply_card_or_text(
-                    event,
-                    tpl_name="qqmusic-list",
-                    data=data,
-                    format_text=lambda d: cardlib.format_mv_list_text(shown)
-                    + "\n\n发 #qqmMV 播放 / 下载 序号",
-                ):
-                    event.stop_event()
-                    return
-            await service.reply(
-                event,
-                cardlib.format_mv_list_text(shown)
-                + "\n\n发 #qqmMV 播放 / 下载 序号",
-            )
-        except Exception as err:
-            service.log_warn(f"MV 分类浏览失败: {err}")
-            await service.reply(event, f"MV 分类浏览失败：{err}")
-        event.stop_event()
         return
 
     # 裸关键词（无 播放/下载/搜索/分类 动词）默认视为 MV 搜索
@@ -403,39 +390,10 @@ async def mv(service: MusicService, event: AstrMessageEvent):
         await service.reply(event, "用法：#qqmMV 搜索 关键词")
         event.stop_event()
         return
-    try:
-        lst = await qqapi.search_mv(rest, page_size=10, user_key=user_key)
-        if not lst:
-            await service.reply(event, f"没有搜到相关 MV：{rest}")
-            event.stop_event()
-            return
-        await cardlib.SessionStore.set(
-            service.plugin,
-            scope,
-            {
-                "type": "mvList",
-                "data": lst,
-            },
-        )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_mv_list_card_data(f"MV · {rest}", lst, cfg=cfg)
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_mv_list_text(lst)
-                + "\n\n发 #qqmMV 播放 / 下载 序号",
-            ):
-                event.stop_event()
-                return
-        await service.reply(
-            event,
-            cardlib.format_mv_list_text(lst) + "\n\n发 #qqmMV 播放 / 下载 序号",
-        )
-    except Exception as err:
-        service.log_warn(f"MV 搜索失败: {err}")
-        await service.reply(event, f"MV 搜索失败：{err}")
-    event.stop_event()
+    await _mv_search(
+        service, event, keyword=rest, scope=scope, user_key=user_key,
+        missing_hint=f"没有搜到相关 MV：{rest}",
+    )
 
 
 async def recommend(service: MusicService, event: AstrMessageEvent):
@@ -483,7 +441,7 @@ async def recommend(service: MusicService, event: AstrMessageEvent):
         await service.reply(event, "\n".join(lines))
     except Exception as err:
         service.log_warn(f"推荐失败: {err}")
-        await service.reply(event, "推荐失败，请稍后重试")
+        await service.reply(event, msg.RECOMMEND_FAIL_HINT)
     event.stop_event()
 
 
@@ -516,11 +474,16 @@ async def random_song(service: MusicService, event: AstrMessageEvent):
             event.stop_event()
             return
         await deliver_song(
-            service.plugin, event, song, play, cfg=service.cfg(), plugin_dir=PLUGIN_DIR
+            service.plugin,
+            event,
+            song,
+            play,
+            cfg=service.cfg(),
+            user_key=user_key,
         )
     except Exception as err:
         service.log_warn(f"推荐失败: {err}")
-        await service.reply(event, "推荐失败，请稍后重试")
+        await service.reply(event, msg.RECOMMEND_FAIL_HINT)
     event.stop_event()
 
 
@@ -546,21 +509,7 @@ async def radio(service: MusicService, event: AstrMessageEvent):
                 "data": songs,
             },
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(
-                "个性电台",
-                songs,
-                cfg=cfg,
-            )
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(songs, "个性电台"),
-            ):
-                event.stop_event()
-                return
-        await service.reply(event, cardlib.format_song_list(songs, "个性电台"))
+        await service.reply_song_list(event, "个性电台", songs)
     except Exception as err:
         service.log_warn(f"电台失败: {err}")
         await service.reply(event, "电台失败，请稍后重试")
@@ -597,17 +546,7 @@ async def daily(service: MusicService, event: AstrMessageEvent):
                 "data": songs,
             },
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(title, songs, cfg=cfg)
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(songs, title),
-            ):
-                event.stop_event()
-                return
-        await service.reply(event, cardlib.format_song_list(songs, title))
+        await service.reply_song_list(event, title, songs)
     except Exception as err:
         service.log_warn(f"日推失败: {err}")
         if (
@@ -661,27 +600,12 @@ async def artist(service: MusicService, event: AstrMessageEvent):
                 "singer": singer,
             },
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(
-                title,
-                result["list"],
-                {
-                    "tip": f"发送 #qqm听序号 播放「{singer.get('singerName', '')}」的歌曲"
-                },
-                cfg=service.cfg(),
-            )
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(
-                    result["list"], title
-                ),
-            ):
-                await service.send_singer_desc(event, singer, user_key)
-                event.stop_event()
-                return
-        await service.reply(event, cardlib.format_song_list(result["list"], title))
+        await service.reply_song_list(
+            event,
+            title,
+            result["list"],
+            tip=f"发送 #qqm听序号 播放「{singer.get('singerName', '')}」的歌曲",
+        )
         await service.send_singer_desc(event, singer, user_key)
     except Exception as err:
         service.log_warn(f"歌手搜索失败: {err}")
@@ -737,40 +661,24 @@ async def album(service: MusicService, event: AstrMessageEvent):
             {"type": "albumList", "keyword": f"专辑 · {keyword}", "data": albums},
         )
         tip = "查看该专辑的曲目列表"
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(
-                f"专辑 · {keyword}",
-                view,
-                options={
-                    "tip": tip,
-                    "commands": [
-                        {
-                            "name": "#qqm听序号",
-                            "desc": "展开该专辑曲目，随后可再选歌播放",
-                            "example": "#qqm听1",
-                        },
-                        {
-                            "name": "列表有效期",
-                            "desc": "本列表约 10 分钟内有效，过期请重新搜索",
-                            "example": "#qqm专辑 关键词",
-                        },
-                    ],
-                },
-                cfg=service.cfg(),
-            )
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(view, f"专辑 · {keyword}")
-                + f"\n\n回复 #qqm听序号 {tip}",
-            ):
-                event.stop_event()
-                return
-        await service.reply(
+        await service.reply_song_list(
             event,
-            cardlib.format_song_list(view, f"专辑 · {keyword}")
-            + f"\n\n回复 #qqm听序号 {tip}",
+            f"专辑 · {keyword}",
+            view,
+            tip=tip,
+            text_suffix=f"\n\n回复 #qqm听序号 {tip}",
+            commands=[
+                {
+                    "name": "#qqm听序号",
+                    "desc": "展开该专辑曲目，随后可再选歌播放",
+                    "example": "#qqm听1",
+                },
+                {
+                    "name": "列表有效期",
+                    "desc": "本列表约 10 分钟内有效，过期请重新搜索",
+                    "example": "#qqm专辑 关键词",
+                },
+            ],
         )
     except Exception as err:
         service.log_warn(f"专辑搜索失败: {err}")
@@ -817,17 +725,7 @@ async def playlist(service: MusicService, event: AstrMessageEvent):
                 "playlist": pl,
             },
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(title, songs, cfg=service.cfg())
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(songs, title),
-            ):
-                event.stop_event()
-                return
-        await service.reply(event, cardlib.format_song_list(songs, title))
+        await service.reply_song_list(event, title, songs)
     except Exception as err:
         service.log_warn(f"歌单搜索失败: {err}")
         await service.reply(event, "歌单搜索失败，请稍后重试")

@@ -1,30 +1,24 @@
 from __future__ import annotations
 
-import asyncio
 import re
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image
 
-try:
-    from ..core import api as qqapi
-    from ..core import cards as cardlib
-    from ..core.service import MusicService
-    from .base import Route
-except (ImportError, ValueError):
-    from core import api as qqapi
-    from core import cards as cardlib
-    from core.service import MusicService
-    from handlers.base import Route
+from ..core import api as qqapi
+from ..core import cards as cardlib
+from ..core import messages as msg
+from ..core.service import MusicService
+from .base import Route
 
 
 async def start_qr_login(service: MusicService, event: AstrMessageEvent):
-    """#qqm登录qq QQ音乐 App 扫码登录（MQTT 备用通道，主人）"""
+    """#qqm登录qq QQ音乐 App 扫码登录（备用通道，主人）"""
     cfg = service.cfg()
     if not cfg.get("enable", True):
         return
     if cfg.get("qrLoginEnable") is False:
-        await service.reply(event, "扫码登录已在配置中关闭")
+        await service.reply(event, msg.SCAN_LOGIN_DISABLED)
         event.stop_event()
         return
     service.stop_poll(service.user_key(event))
@@ -35,7 +29,7 @@ async def start_qr_login(service: MusicService, event: AstrMessageEvent):
         data = qqapi.unwrap_data(body)
         if not data.get("qrcodeID"):
             await service.reply(
-                event, f"获取二维码失败：{(body or {}).get('errMsg') or '未知错误'}"
+                event, msg.qr_fetch_fail((body or {}).get("errMsg"))
             )
             event.stop_event()
             return
@@ -59,14 +53,12 @@ async def start_qr_login(service: MusicService, event: AstrMessageEvent):
         img_sent = False
         if qr_path:
             try:
-                await service.send_chain(
+                img_sent = await service.send_chain(
                     event, Image.fromFileSystem(qr_path), service.plain(tip_text)
                 )
-                img_sent = True
             except Exception:
                 pass
-            loop = asyncio.get_event_loop()
-            loop.call_later(120, lambda: service.safe_unlink(qr_path))
+            service.schedule_unlink(qr_path, 120)
         if not img_sent:
             await service.reply(
                 event, tip_text + "\n（图片发送失败可重新 #qqm登录qq）"
@@ -89,7 +81,7 @@ async def start_webqr_login(service: MusicService, event: AstrMessageEvent):
     if not cfg.get("enable", True):
         return
     if cfg.get("qrLoginEnable") is False:
-        await service.reply(event, "扫码登录已在配置中关闭")
+        await service.reply(event, msg.SCAN_LOGIN_DISABLED)
         event.stop_event()
         return
     service.stop_poll(service.user_key(event))
@@ -102,8 +94,7 @@ async def start_webqr_login(service: MusicService, event: AstrMessageEvent):
             data.get("qrcodeWx") or data.get("qrcodeQq")
         ):
             await service.reply(
-                event,
-                f"获取二维码失败：{(body or {}).get('errMsg') or '未知错误'}",
+                event, msg.qr_fetch_fail((body or {}).get("errMsg"))
             )
             event.stop_event()
             return
@@ -119,28 +110,27 @@ async def start_webqr_login(service: MusicService, event: AstrMessageEvent):
             codes = [("微信", qrcode_wx)]
         elif qrcode_qq:
             codes = [("QQ", qrcode_qq)]
-        elif qrcode_wx:
-            codes = [("微信", qrcode_wx)]
         else:
-            codes = [
-                c
-                for c in (("QQ", qrcode_qq), ("微信", qrcode_wx))
-                if c[1] and c[1].startswith("data:")
-            ]
+            # 走到这里必有 qrcode_wx（上面的入口校验保证了 qrcodeWx/qrcodeQq 至少一个为真），
+            # 原先还有一个「两者都假」的 else 兜底分支，属不可达死代码，已删除
+            codes = [("微信", qrcode_wx)]
         img_sent = 0
         for _, code in codes:
             if not (code and code.startswith("data:")):
                 continue
+            qr_path = ""
             try:
                 b64 = code.split(",", 1)[1]
                 qr_path = await service.save_qr_image(b64)
-                await service.send_chain(event, Image.fromFileSystem(qr_path))
-                img_sent += 1
-                loop = asyncio.get_event_loop()
-                loop.call_later(120, lambda p=qr_path: service.safe_unlink(p))
+                if await service.send_chain(event, Image.fromFileSystem(qr_path)):
+                    img_sent += 1
             except Exception as err:
                 service.log_warn(f"二维码图片发送失败: {err}")
-                continue
+            finally:
+                # 登记必须覆盖发送失败/抛错的路径：原先登记写在 try 内、且在
+                # img_sent += 1 之后，send_chain 一抛错就 continue，PNG 永久残留在 temp
+                if qr_path:
+                    service.schedule_unlink(qr_path, 120)
         if len(codes) == 1:
             tips = f"请用{codes[0][0]}扫一扫，确认后自动登录"
         else:
@@ -184,8 +174,8 @@ async def login_status(service: MusicService, event: AstrMessageEvent):
         if not data.get("loggedIn") and api_hint:
             data["vipExpireText"] = api_hint
         url = await service.render_card(event, data, "qqmusic-status")
-        if url:
-            await service.send_chain(event, Image.fromFileSystem(url))
+        if url and await service.send_chain(event, Image.fromFileSystem(url)):
+            pass
         else:
             await service.reply(
                 event,
@@ -204,7 +194,23 @@ async def logout(service: MusicService, event: AstrMessageEvent):
     user_key = service.user_key(event)
     try:
         await qqapi.request("/login/logout", {}, "post", user_key)
-        await service.reply(event, "已解除登录绑定")
+        # 只看「请求没抛错」就宣布成功会谎报：登出后复查 /login/status 的真实登录态
+        meta = None
+        try:
+            meta = await qqapi.pull_login_meta(user_key)
+        except Exception as err:
+            service.log_warn(f"登出后复查登录态失败: {err}")
+        if meta is None:
+            await service.reply(
+                event, "已解除登录绑定（未能复查 API 登录态，可 #qqm状态 确认）"
+            )
+        elif meta.get("login") or meta.get("hasKey"):
+            await service.reply(
+                event,
+                "⚠️ 登出请求已发送，但 API 仍显示已登录，请稍后 #qqm状态 复查",
+            )
+        else:
+            await service.reply(event, "已解除登录绑定")
     except Exception as err:
         await service.reply(event, f"登出失败：{err}")
     event.stop_event()
@@ -253,14 +259,39 @@ async def refresh_key(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "\n".join(x for x in lines if x))
             event.stop_event()
             return
+        # result ∈ (100,0) 只说明「请求被受理」：返回 data 为空时并没有任何刷新证据，
+        # 原先照样宣布「✅ key 已刷新」。这里与 bind_manual 一致，先按真实登录态判定
+        # （refresh 返回体自带 uin/hasKey 直接采信，否则复查 /login/status）。
+        info = await service.pick_login_success(body or {})
+        meta = None
+        try:
+            meta = await qqapi.pull_login_meta(user_key)
+        except Exception as err:
+            service.log_warn(f"刷新后复查登录态失败: {err}")
+        if not info and not (meta and meta.get("login") and meta.get("hasKey")):
+            lines = [
+                "刷新未生效："
+                + ((body or {}).get("errMsg") or "未返回有效登录态（缺 uin/hasKey）"),
+                (body or {}).get("tip") or d.get("tip") or "",
+                "请 #qqm状态 复查或重新 #qqm登录",
+            ]
+            await service.reply(event, "\n".join(x for x in lines if x))
+            event.stop_event()
+            return
         lines = ["✅ key 已刷新"]
-        if d.get("uin"):
-            lines.append(f"uin: {d['uin']}")
+        uin = (info or {}).get("uin") or (meta or {}).get("uin") or d.get("uin")
+        if uin:
+            lines.append(f"uin: {uin}")
         if d.get("changed") is False:
             lines.append("（key 未变化）")
-        if d.get("hasRefresh") is False:
-            lines.append("⚠️ 无 refresh，过期后需重新扫码")
-        elif d.get("hasRefresh"):
+        # hasRefresh 优先看 refresh 返回体；它没给时用复查到的登录态兜底，避免把
+        # 「未知」当成「没有 refresh」而误导用户重新扫码
+        has_refresh = d.get("hasRefresh")
+        if has_refresh is None and meta is not None:
+            has_refresh = meta.get("hasRefresh")
+        if has_refresh is False:
+            lines.append(msg.NO_REFRESH_WARN)
+        elif has_refresh:
             lines.append("含 refresh，后续可自动续期")
         await service.reply(event, "\n".join(lines))
     except Exception as err:
@@ -282,8 +313,21 @@ async def bind_manual(service: MusicService, event: AstrMessageEvent):
             "/login/deeplink", {"url": raw}, "post", service.user_key(event)
         )
         d = (body or {}).get("data") or {}
+        # 只要 result ∈ (None,100,0) 就不会抛错——API 返回 result=100 但 data 为空时
+        # 原先照样宣布「✅ 登录成功」，用户下一次点歌才发现根本没登录。故先按登录态
+        # 判定（复用轮询通道同一个 pick_login_success），判定不过就明确报失败。
+        info = await service.pick_login_success(body or {})
+        if not info:
+            reason = (body or {}).get("errMsg") or "未返回有效登录态（缺 uin/hasKey）"
+            await service.reply(
+                event,
+                f"绑定失败：{reason}\n"
+                "链接可能已过期，请重新从 QQ 音乐 App 复制，或改用 #qqm登录 扫码",
+            )
+            event.stop_event()
+            return
         await service.on_login_success(
-            event, {**d, "channel": d.get("channel") or "deeplink"}
+            event, {**info, "channel": d.get("channel") or "deeplink"}
         )
     except Exception as err:
         await service.reply(event, f"绑定失败：{err}")
@@ -301,9 +345,21 @@ async def import_deeplink(service: MusicService, event: AstrMessageEvent):
             "/login/deeplink", {"url": m.group(0)}, "post", service.user_key(event)
         )
         d = (body or {}).get("data") or {}
+        # 同 bind_manual：先校验真的拿到 uin/hasKey 再宣布成功，也不提前停掉正在
+        # 进行的扫码轮询（链接无效时用户可能正靠扫码通道登录）
+        info = await service.pick_login_success(body or {})
+        if not info:
+            reason = (body or {}).get("errMsg") or "未返回有效登录态（缺 uin/hasKey）"
+            await service.reply(
+                event,
+                f"DeepLink 导入失败：{reason}\n"
+                "链接可能已过期，请重新从 QQ 音乐 App 复制，或改用 #qqm登录 扫码",
+            )
+            event.stop_event()
+            return
         service.stop_poll(service.user_key(event))
         await service.on_login_success(
-            event, {**d, "channel": d.get("channel") or "deeplink"}
+            event, {**info, "channel": d.get("channel") or "deeplink"}
         )
     except Exception as err:
         await service.reply(event, f"DeepLink 导入失败：{err}")
@@ -336,7 +392,7 @@ ROUTES: list[Route] = [
     Route(
         pattern=re.compile(r"^#?(qqm登录(qq|app))$", re.IGNORECASE),
         name="start_qr_login",
-        doc="#qqm登录qq QQ音乐 App 扫码登录（MQTT 备用通道，主人）",
+        doc="#qqm登录qq QQ音乐 App 扫码登录（备用通道，主人）",
         run=start_qr_login,
         admin=True,
         priority=6,

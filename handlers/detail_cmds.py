@@ -4,16 +4,11 @@ import re
 
 from astrbot.api.event import AstrMessageEvent
 
-try:
-    from ..core import api as qqapi
-    from ..core import cards as cardlib
-    from ..core.service import MusicService
-    from .base import Route
-except (ImportError, ValueError):
-    from core import api as qqapi
-    from core import cards as cardlib
-    from core.service import MusicService
-    from handlers.base import Route
+from ..core import api as qqapi
+from ..core import cards as cardlib
+from ..core import messages as msg
+from ..core.service import MusicService, follow_qq_redirect
+from .base import Route
 
 
 async def get_lyric(service: MusicService, event: AstrMessageEvent):
@@ -33,72 +28,108 @@ async def get_lyric(service: MusicService, event: AstrMessageEvent):
         return
 
     user_key = service.user_key(event)
-    songmid = key
-    song_meta = {"songName": key, "singerName": "", "cover": "", "albumName": ""}
-
+    # 解析目标歌曲：序号 / 链接 / 关键词三个分支；helper 回复并终止后返回 None
+    resolved: tuple[str, dict] | None = (key, {"songName": key, "singerName": "", "cover": "", "albumName": ""})
     if re.match(r"^\d{1,2}$", key):
-        scope = service.scope(event)
-        session = await cardlib.SessionStore.get(service.plugin, scope)
-        n = int(key)
-        if session and session.get("type") in ("topCategory", "recommend"):
-            await service.reply(
-                event,
-                "当前是榜单分类列表，请先 #qqm排行 榜单名 列出歌曲"
-                if session.get("type") == "topCategory"
-                else "当前是推荐歌单列表，请先 #qqm推荐听序号 列出歌曲",
-            )
-            event.stop_event()
-            return
-        if session and session.get("type") == "mvList":
-            await service.reply(event, "当前列表是 MV，请用 #qqmMV 播放 序号；查歌词请先 #qqm点歌")
-            event.stop_event()
-            return
-        session_data = (session or {}).get("data") or []
-        if session_data and 1 <= n <= len(session_data):
-            song = session_data[n - 1]
-            mid = song.get("songmid") or song.get("songMid") or ""
-            if not mid:
-                await service.reply(event, "该歌曲缺少 songmid，无法查询歌词，请用 #qqm歌词 关键词")
-                event.stop_event()
-                return
-            songmid = mid
-            song_meta = {
-                "songName": song.get("songName") or key,
-                "singerName": song.get("singerName") or "",
-                "cover": song.get("cover") or "",
-                "albumName": song.get("albumName") or "",
-            }
-        else:
-            await service.reply(
-                event,
-                f"请选择 1-{len(session_data)}"
-                if session_data
-                else "暂无点歌列表，请先 #qqm点歌，或用 #qqm歌词 关键词",
-            )
-            event.stop_event()
-            return
+        resolved = await _lyric_from_session(service, event, key)
+    elif re.search(r"https?://|y\.qq\.com", key, re.IGNORECASE):
+        resolved = await _lyric_from_link(service, event, key, user_key)
     elif not re.match(r"^[0-9A-Za-z]{10,}$", key) or re.search(r"[\u4e00-\u9fa5]", key):
-        try:
-            lst = await qqapi.search_songs(key, page_size=1, user_key=user_key)
-            if not lst:
-                await service.reply(event, "未找到歌曲")
-                event.stop_event()
-                return
-            first = lst[0]
-            songmid = first.get("songmid") or first.get("songMid") or ""
-            song_meta = {
-                "songName": first.get("songName") or key,
-                "singerName": first.get("singerName") or "",
-                "cover": first.get("cover") or "",
-                "albumName": first.get("albumName") or "",
-            }
-        except Exception as err:
-            await service.reply(event, f"歌词失败：{err}")
-            event.stop_event()
-            return
+        resolved = await _lyric_by_search(service, event, key, user_key)
+    if resolved is None:
+        return
+    songmid, song_meta = resolved
 
     await service.show_lyric_by_meta(event, songmid, song_meta, user_key)
     event.stop_event()
+
+
+def _lyric_meta(key: str, song: dict) -> dict:
+    return {
+        "songName": song.get("songName") or key,
+        "singerName": song.get("singerName") or "",
+        "cover": song.get("cover") or "",
+        "albumName": song.get("albumName") or "",
+    }
+
+
+async def _lyric_from_session(
+    service: MusicService, event: AstrMessageEvent, key: str
+) -> tuple[str, dict] | None:
+    """按会话序号取歌词目标；分支自身回复并 stop_event 后返回 None。"""
+    scope = service.scope(event)
+    session = await cardlib.SessionStore.get(service.plugin, scope)
+    n = int(key)
+    if session and session.get("type") in ("topCategory", "recommend"):
+        await service.reply(
+            event,
+            msg.SESSION_TOP_CATEGORY_HINT
+            if session.get("type") == "topCategory"
+            else msg.SESSION_RECOMMEND_HINT,
+        )
+        event.stop_event()
+        return None
+    if session and session.get("type") == "mvList":
+        await service.reply(event, "当前列表是 MV，请用 #qqmMV 播放 序号；查歌词请先 #qqm点歌")
+        event.stop_event()
+        return None
+    session_data = (session or {}).get("data") or []
+    if not (session_data and 1 <= n <= len(session_data)):
+        await service.reply(
+            event,
+            msg.out_of_range(len(session_data))
+            if session_data
+            else "暂无点歌列表，请先 #qqm点歌，或用 #qqm歌词 关键词",
+        )
+        event.stop_event()
+        return None
+    song = session_data[n - 1]
+    mid = song.get("songmid") or song.get("songMid") or ""
+    if not mid:
+        await service.reply(event, "该歌曲缺少 songmid，无法查询歌词，请用 #qqm歌词 关键词")
+        event.stop_event()
+        return None
+    return mid, _lyric_meta(key, song)
+
+
+async def _lyric_from_link(
+    service: MusicService, event: AstrMessageEvent, key: str, user_key: str
+) -> tuple[str, dict] | None:
+    """从歌曲链接解析歌词目标；c6.y.qq.com 短链先跟随重定向（白名单内）再解析。"""
+    try:
+        ids = qqapi.parse_qqmusic_ids(key)
+        if not ids.get("songmid") and "c6.y.qq.com" in key:
+            url_m = re.search(r"https?://\S+", key)
+            if url_m:
+                ids = qqapi.parse_qqmusic_ids(await follow_qq_redirect(url_m.group(0)))
+        song = await service.ids_to_song(ids, key, user_key)
+    except Exception as err:
+        await service.reply(event, f"歌词失败：{err}")
+        event.stop_event()
+        return None
+    mid = (song or {}).get("songmid") or ""
+    if not mid:
+        await service.reply(event, "未能从链接中解析出歌曲，请改用 #qqm歌词 关键词")
+        event.stop_event()
+        return None
+    return mid, _lyric_meta(key, song)
+
+
+async def _lyric_by_search(
+    service: MusicService, event: AstrMessageEvent, key: str, user_key: str
+) -> tuple[str, dict] | None:
+    """纯文本关键词搜索第一条作为歌词目标。"""
+    try:
+        lst = await qqapi.search_songs(key, page_size=1, user_key=user_key)
+        if not lst:
+            await service.reply(event, "未找到歌曲")
+            event.stop_event()
+            return None
+        return (lst[0].get("songmid") or lst[0].get("songMid") or ""), _lyric_meta(key, lst[0])
+    except Exception as err:
+        await service.reply(event, f"歌词失败：{err}")
+        event.stop_event()
+        return None
 
 
 async def get_comment(service: MusicService, event: AstrMessageEvent):
@@ -151,17 +182,7 @@ async def favorites(service: MusicService, event: AstrMessageEvent):
                 "data": songs,
             },
         )
-        if cfg.get("renderListCard", True):
-            data = cardlib.build_list_card_data(title, songs, cfg=cfg)
-            if await service.reply_card_or_text(
-                event,
-                tpl_name="qqmusic-list",
-                data=data,
-                format_text=lambda d: cardlib.format_song_list(songs, title),
-            ):
-                event.stop_event()
-                return
-        await service.reply(event, cardlib.format_song_list(songs, title))
+        await service.reply_song_list(event, title, songs)
     except Exception as err:
         service.log_warn(f"收藏失败: {err}")
         if (

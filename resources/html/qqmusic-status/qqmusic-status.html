@@ -318,13 +318,13 @@
             <div class="avatar-ring">
               <div class="avatar-inner">
                 <img
-                  class="avatar{{ if data.avatarIsPhoto }} is-photo{{ /if }}"
+                  class="avatar{% if data.avatarIsPhoto %} is-photo{% endif %}"
                   src="{{ data.avatarUrl }}"
                   alt="avatar"
                 />
               </div>
             </div>
-            <div class="status-dot{{ if data.loggedIn }} on{{ /if }}"></div>
+            <div class="status-dot{% if data.loggedIn %} on{% endif %}"></div>
           </div>
         </div>
       </div>
@@ -359,12 +359,12 @@
         </div>
 
         <div class="stats">
-          {{ each data.stats item }}
+          {% for item in data.stats %}
           <div class="tile stat">
             <div class="stat-value">{{ item.value }}</div>
             <div class="stat-label">{{ item.label }}</div>
           </div>
-          {{ /each }}
+          {% endfor %}
         </div>
 
         <div class="footer">{{ data.footer }}</div>

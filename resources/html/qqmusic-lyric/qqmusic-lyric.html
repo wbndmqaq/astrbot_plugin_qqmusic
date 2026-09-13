@@ -378,21 +378,21 @@
     <div class="card">
       <div class="hero">
         <div class="hero-top">
-          {{if data.cover}}
-          <img class="cover" src="{{data.cover}}" referrerpolicy="no-referrer" />
-          {{else}}
+          {% if data.cover %}
+          <img class="cover" src="{{ data.cover }}" referrerpolicy="no-referrer" />
+          {% else %}
           <div class="cover ph">♪</div>
-          {{/if}}
+          {% endif %}
           <div class="hero-text">
             <div class="eyebrow">QQ MUSIC LYRIC</div>
-            <div class="title">{{data.songName || '歌词'}}</div>
-            <div class="subtitle">{{data.singerName || ''}}{{data.albumName ? ' · ' + data.albumName : ''}}</div>
+            <div class="title">{{ ('歌词' if not data.songName else data.songName) }}</div>
+            <div class="subtitle">{{ ('' if not data.singerName else data.singerName) }}{{ ((' · ' ~ data.albumName) if data.albumName else '') }}</div>
           </div>
-          <div class="version-pill">{{data.lineCount || 0}} 行</div>
+          <div class="version-pill">{{ (0 if not data.lineCount else data.lineCount) }} 行</div>
         </div>
         <div class="hero-stats">
           <div class="stat">
-            <div class="stat-num">{{data.lineCount || 0}}</div>
+            <div class="stat-num">{{ (0 if not data.lineCount else data.lineCount) }}</div>
             <div class="stat-label">歌词行数</div>
           </div>
           <div class="stat">
@@ -400,8 +400,8 @@
             <div class="stat-label">展示模式</div>
           </div>
           <div class="stat">
-            <div class="stat-num">{{data.songmid ? 'MID' : '—'}}</div>
-            <div class="stat-label">{{data.songmid || '无 mid'}}</div>
+            <div class="stat-num">{{ ('MID' if data.songmid else '—') }}</div>
+            <div class="stat-label">{{ ('无 mid' if not data.songmid else data.songmid) }}</div>
           </div>
         </div>
       </div>
@@ -414,13 +414,13 @@
             <div class="section-tag">纯文本</div>
           </div>
           <div class="lyrics">
-            {{each data.lines line}}
-            {{if line}}
-            <div class="line">{{line}}</div>
-            {{else}}
+            {% for line in data.lines %}
+            {% if line %}
+            <div class="line">{{ line }}</div>
+            {% else %}
             <div class="line empty"></div>
-            {{/if}}
-            {{/each}}
+            {% endif %}
+            {% endfor %}
           </div>
         </div>
 
@@ -450,11 +450,11 @@
 
         <div class="tips">
           <div class="tips-title"><span>!</span>小提示</div>
-          <div class="tips-body">{{data.tip || '已去除时间戳，纯文本歌词'}}</div>
+          <div class="tips-body">{{ ('已去除时间戳，纯文本歌词' if not data.tip else data.tip) }}</div>
         </div>
 
         <div class="footer">
-          <div class="footer-left">{{data.apiHint || 'API 已对接'}}</div>
+          <div class="footer-left">{{ ('API 已对接' if not data.apiHint else data.apiHint) }}</div>
           <div class="footer-right">astrbot_plugin_qqmusic</div>
         </div>
       </div>

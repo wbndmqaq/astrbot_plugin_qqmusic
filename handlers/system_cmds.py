@@ -5,16 +5,17 @@ import re
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image
 
-try:
-    from ..core import api as qqapi
-    from ..core import cards as cardlib
-    from ..core.service import PLUGIN_DIR, MusicService, get_local_version
-    from .base import Route
-except (ImportError, ValueError):
-    from core import api as qqapi
-    from core import cards as cardlib
-    from core.service import PLUGIN_DIR, MusicService, get_local_version
-    from handlers.base import Route
+from ..core import api as qqapi
+from ..core import cards as cardlib
+from ..core import messages as msg
+from ..core.service import PLUGIN_DIR, MusicService, get_local_version
+from .base import Route
+
+
+def _route_count() -> int:
+    """帮助卡片展示的真实指令路由数（延迟导入避免 handlers 包循环依赖）。"""
+    from . import ALL_ROUTES
+    return len(ALL_ROUTES)
 
 
 async def hot_search(service: MusicService, event: AstrMessageEvent):
@@ -41,48 +42,32 @@ async def hot_search(service: MusicService, event: AstrMessageEvent):
 async def help(service: MusicService, event: AstrMessageEvent):
     """#qqm帮助 帮助图片卡片"""
     cfg = service.cfg()
+    data: dict = {}
     try:
-        version = get_local_version(PLUGIN_DIR)
-        data = cardlib.build_help_card_data(cfg=service.cfg(), version=version)
+        # 数据构造也放在 try 内：任一步抛错都退到下面的文本兜底，不向前抛异常
+        version = await get_local_version(PLUGIN_DIR)
+        data = cardlib.build_help_card_data(
+            cfg=cfg, version=version, command_count=_route_count()
+        )
         url = await service.render_card(event, data, "qqmusic-help")
-        if url:
-            await service.send_chain(event, Image.fromFileSystem(url))
+        # 图片被平台拒绝时不能直接返回：要落到下面的文本兜底，否则用户什么都收不到
+        if url and await service.send_chain(event, Image.fromFileSystem(url)):
             event.stop_event()
             return
     except Exception as err:
         service.log_warn(f"帮助图渲染失败: {err}")
-    await service.reply(
-        event,
-        "\n".join(
-            [
-                "【QQ音乐插件帮助】",
-                "— 点歌（均需 #qqm 前缀）—",
-                "#qqm点歌 七里香  →  #qqm听1（会话内也可 #听1）",
-                "#qqm播放 晴天",
-                "#qqm歌词 七里香  /  #qqm热搜",
-                "— MV —",
-                "#qqmMV 搜索 周杰伦  →  #qqmMV 播放1 / 下载1",
-                "#qqmMV（分类浏览）；点歌后再发 #qqmMV 播放/下载 = 本曲 MV",
-                "— 状态 —",
-                "#qqm登录 / #qqm登录微信 / #qqm登录qq / #qqm状态  /  #qms  /  #qqm登出",
-                "— 管理（主人）—",
-                "#qqm设置  /  #qqm 音质 flac  /  #qqm 测试",
-                "— 解析 —",
-                "分享 QQ 音乐卡片或 y.qq.com 链接自动解析",
-                f"API: {'已配置' if cfg.get('apiBase') else '未配置'}",
-            ]
-        ),
-    )
+    # 文本兜底与卡片共用同一份 sections 数据，不会出现两份清单漂移
+    await service.reply(event, cardlib.format_help_text(data))
     event.stop_event()
 
 
 async def show_config(service: MusicService, event: AstrMessageEvent):
     """#qqm设置 查看当前配置"""
+    data: dict = {}
     try:
         data = await service.build_settings_data(event)
         url = await service.render_card(event, data, "qqmusic-settings")
-        if url:
-            await service.send_chain(event, Image.fromFileSystem(url))
+        if url and await service.send_chain(event, Image.fromFileSystem(url)):
             event.stop_event()
             return
     except Exception as err:
@@ -101,9 +86,14 @@ async def show_config(service: MusicService, event: AstrMessageEvent):
         pass
     adapter_line = f"adapter: {service.platform_name(event)}"
     try:
-        version_line = f"version: v{get_local_version(PLUGIN_DIR)}"
+        version_line = f"version: v{await get_local_version(PLUGIN_DIR)}"
     except Exception:
         version_line = ""
+    # 主人命令清单直接取自卡片数据源，避免两份清单漂移
+    cmd_lines = [
+        f"{x.get('example', '')}  {x.get('desc', '')}"
+        for x in (data.get("commands") or [])
+    ] or ["#qqm帮助  查看完整指令清单"]
     await service.reply(
         event,
         "\n".join(
@@ -124,15 +114,7 @@ async def show_config(service: MusicService, event: AstrMessageEvent):
                 f"原生卡: {c.get('sendNativeCard', False)}  自定义卡: {c.get('sendCustomCard', False)}",
                 "",
                 "主人命令：",
-                "#qqm登录          无感扫码（QQ 码，覆盖 QQ/App，主通道）",
-                "#qqm登录微信      无感扫码（微信码）",
-                "#qqm登录qq        QQ音乐 App 扫码（备用）",
-                "#qqm状态 / #qms   状态图片卡片",
-                "#qqm绑定 deeplink",
-                "#qqm api <地址>   （设置 API 地址）",
-                "#qqm 开启点歌 / #qqm 关闭解析",
-                "#qqm 音质 flac",
-                "#qqm 测试",
+                *cmd_lines,
             ]
         ),
     )
@@ -148,16 +130,16 @@ async def set_api(service: MusicService, event: AstrMessageEvent):
         event.stop_event()
         return
     service.config["apiBase"] = url
-    try:
-        service.config.save_config()
-    except Exception as e:
-        service.log_warn(f"配置保存失败: {e}")
+    if not await service.save_config():
+        await service.reply(event, msg.CONFIG_SAVE_FAIL_HINT)
+        event.stop_event()
+        return
     await service.reply(event, f"API 地址已更新：{cardlib.mask_api_base(url)}")
     event.stop_event()
 
 
 async def toggle(service: MusicService, event: AstrMessageEvent):
-    """#qqm 开启/关闭 点歌/解析 功能开关（主人）"""
+    """#qqm 开启点歌 / #qqm 关闭解析 功能开关（主人，「开启/关闭」与目标之间不能加空格）"""
     m = re.search(r"(开启|关闭)(点歌|解析)", event.message_str)
     if not m:
         event.stop_event()
@@ -165,10 +147,10 @@ async def toggle(service: MusicService, event: AstrMessageEvent):
     on = m.group(1) == "开启"
     key = "enableSongRequest" if m.group(2) == "点歌" else "enableResolve"
     service.config[key] = on
-    try:
-        service.config.save_config()
-    except Exception as e:
-        service.log_warn(f"配置保存失败: {e}")
+    if not await service.save_config():
+        await service.reply(event, msg.CONFIG_SAVE_FAIL_HINT)
+        event.stop_event()
+        return
     await service.reply(event, f"已{m.group(1)}{m.group(2)}")
     event.stop_event()
 
@@ -185,10 +167,10 @@ async def set_quality(service: MusicService, event: AstrMessageEvent):
         event.stop_event()
         return
     service.config["quality"] = q
-    try:
-        service.config.save_config()
-    except Exception as e:
-        service.log_warn(f"配置保存失败: {e}")
+    if not await service.save_config():
+        await service.reply(event, msg.CONFIG_SAVE_FAIL_HINT)
+        event.stop_event()
+        return
     await service.reply(
         event,
         f"默认最高音质已设为 {q}\n"
@@ -241,7 +223,7 @@ ROUTES: list[Route] = [
     Route(
         pattern=r"^#?(qq|QQ)m\s*(开启|关闭)(点歌|解析)$",
         name="toggle",
-        doc="#qqm 开启/关闭 点歌/解析 功能开关（主人）",
+        doc="#qqm 开启点歌 / #qqm 关闭解析 功能开关（主人，「开启/关闭」与目标之间不能加空格）",
         run=toggle,
         admin=True,
     ),
