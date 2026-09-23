@@ -8,6 +8,7 @@ from astrbot.api.message_components import Image
 from ..core import api as qqapi
 from ..core import cards as cardlib
 from ..core import messages as msg
+from ..core import panels
 from ..core.service import PLUGIN_DIR, MusicService, get_local_version
 from .base import Route
 
@@ -78,7 +79,8 @@ async def show_config(service: MusicService, event: AstrMessageEvent):
         st = await qqapi.request("/login/status", {}, "get", service.user_key(event))
         d = (st or {}).get("data") or {}
         login_line = (
-            f"login: 已绑定 uin={d.get('uin')} ({d.get('nick')})"
+            # 与状态卡口径一致：uin 脱敏后输出，避免完整账号明文发给任意用户
+            f"login: 已绑定 uin={panels.mask_uin(d.get('uin'))} ({d.get('nick')})"
             if d.get("login")
             else "login: 未绑定（#qqm登录 扫码）"
         )
@@ -201,7 +203,11 @@ ROUTES: list[Route] = [
         run=hot_search,
     ),
     Route(
-        pattern=r"^#?(qq|QQ)m\s*help$|^#?(qq|QQ)m\s*帮助$|^#?(qq|QQ)音乐帮助$|^#qm帮助$",
+        # IGNORECASE 使 #QQM帮助 / #QQMHelp 等大写形态同样可响应
+        pattern=re.compile(
+            r"^#?qqm\s*help$|^#?qqm\s*帮助$|^#?qq音乐帮助$|^#qm帮助$",
+            re.IGNORECASE,
+        ),
         name="help",
         doc="#qqm帮助 帮助图片卡片",
         run=help,

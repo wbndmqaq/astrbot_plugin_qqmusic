@@ -1,6 +1,6 @@
 {
   "apiBase": { "type": "string", "description": "QQ 音乐 API 地址 (去申请，具体去看README)", "default": "" },
-  "apiToken": { "type": "string", "description": "API Token（与 API 端 QQMUSIC_API_TOKEN 一致）", "default": "" },
+  "apiToken": { "type": "string", "description": "API Token（与 API 端 QQMUSIC_API_TOKEN 一致）", "default": "", "secret": true },
   "enable": { "type": "bool", "description": "插件功能总开关：关闭后点歌、播放、歌词、榜单、解析、登录等指令不再响应；`#qqm热搜`/`#qqm帮助` 等只读指令与 `#qqm设置`/`#qqm音质`/`#qqm api`/`#qqm测试` 等配置类指令保留，便于自助排查与恢复。", "default": true },
   "enableSongRequest": { "type": "bool", "description": "点歌功能开关", "default": true },
   "enableResolve": { "type": "bool", "description": "QQ 音乐分享/链接自动解析开关", "default": true },

@@ -335,7 +335,13 @@ async def bind_manual(service: MusicService, event: AstrMessageEvent):
 
 
 async def import_deeplink(service: MusicService, event: AstrMessageEvent):
-    """识别 qqmusic:// DeepLink 并导入登录态（主人）"""
+    """识别 qqmusic:// DeepLink 并导入登录态（主人；非主人静默忽略）"""
+    # 管理员守卫必须放在函数最前面：本路由不能挂 admin=True——pattern 是非锚定的
+    # search，普通用户消息里只要含 qqmusic:// 就会命中，路由级权限过滤会在
+    # waking_check 阶段以「权限不足」拦截并 stop_event，整条消息对所有插件失效。
+    # 改为这里静默返回（不回复、不停事件），消息继续流经其它插件。
+    if not event.is_admin():
+        return
     text = event.message_str
     m = re.search(r"qqmusic://[^\s]+", text, re.IGNORECASE)
     if not m:
@@ -455,9 +461,8 @@ ROUTES: list[Route] = [
     Route(
         pattern=r"qqmusic://",
         name="import_deeplink",
-        doc="识别 qqmusic:// DeepLink 并导入登录态（主人）",
+        doc="识别 qqmusic:// DeepLink 并导入登录态（主人，非主人静默忽略）",
         run=import_deeplink,
-        admin=True,
     ),
     Route(
         pattern=re.compile(r"^#?qqm\s*(账号|accounts|已登录)$", re.IGNORECASE),

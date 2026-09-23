@@ -48,6 +48,7 @@ from astrbot.api.message_components import Image
 from . import api as qqapi
 from . import cards as cardlib
 from . import messages as msg
+from . import panels
 
 if TYPE_CHECKING:  # 仅类型注解（MusicService 反向委托到本模块，运行时不导入）
     from .service import MusicService
@@ -642,7 +643,8 @@ async def on_login_success(service: MusicService, event, info: dict | None = Non
         service.log_warn(f"拉取登录态元信息失败: {e}")
     lines = ["✅ 登录成功"]
     if uin:
-        lines.append(f"uin: {uin}")
+        # 与状态卡口径一致：脱敏后输出，避免群聊泄露完整 uin
+        lines.append(f"uin: {panels.mask_uin(uin)}")
     if nick:
         lines.append(f"昵称: {nick}")
     if has_key is False:

@@ -30,8 +30,14 @@ async def get_lyric(service: MusicService, event: AstrMessageEvent):
     user_key = service.user_key(event)
     # 解析目标歌曲：序号 / 链接 / 关键词三个分支；helper 回复并终止后返回 None
     resolved: tuple[str, dict] | None = (key, {"songName": key, "singerName": "", "cover": "", "albumName": ""})
-    if re.match(r"^\d{1,2}$", key):
+    if re.match(r"^\d+$", key):
+        # 纯数字：先按会话序号处理；未命中（无会话/越界/缺 songmid）回退按关键词搜索，
+        # 不再进 songmid 分支（songmid 是字母数字混合 ID，纯数字查询必然失败）
         resolved = await _lyric_from_session(service, event, key)
+        if resolved is None:
+            return
+        if not resolved[0]:
+            resolved = await _lyric_by_search(service, event, key, user_key)
     elif re.search(r"https?://|y\.qq\.com", key, re.IGNORECASE):
         resolved = await _lyric_from_link(service, event, key, user_key)
     elif not re.match(r"^[0-9A-Za-z]{10,}$", key) or re.search(r"[\u4e00-\u9fa5]", key):
@@ -56,7 +62,10 @@ def _lyric_meta(key: str, song: dict) -> dict:
 async def _lyric_from_session(
     service: MusicService, event: AstrMessageEvent, key: str
 ) -> tuple[str, dict] | None:
-    """按会话序号取歌词目标；分支自身回复并 stop_event 后返回 None。"""
+    """按会话序号取歌词目标；特殊会话类型回复指引并 stop_event 后返回 None。
+
+    无会话 / 序号越界 / 目标缺 songmid 时返回 ``("", {})``，由调用方回退关键词搜索。
+    """
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
     n = int(key)
@@ -75,20 +84,11 @@ async def _lyric_from_session(
         return None
     session_data = (session or {}).get("data") or []
     if not (session_data and 1 <= n <= len(session_data)):
-        await service.reply(
-            event,
-            msg.out_of_range(len(session_data))
-            if session_data
-            else "暂无点歌列表，请先 #qqm点歌，或用 #qqm歌词 关键词",
-        )
-        event.stop_event()
-        return None
+        return "", {}
     song = session_data[n - 1]
     mid = song.get("songmid") or song.get("songMid") or ""
     if not mid:
-        await service.reply(event, "该歌曲缺少 songmid，无法查询歌词，请用 #qqm歌词 关键词")
-        event.stop_event()
-        return None
+        return "", {}
     return mid, _lyric_meta(key, song)
 
 

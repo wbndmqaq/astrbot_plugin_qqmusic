@@ -186,8 +186,11 @@ async def _handle_response(res: aiohttp.ClientResponse):
     try:
         data = await res.json(content_type=None)
     except Exception as e:
-        text = await res.text()
-        raise ApiError(f"返回非 JSON：{text[:200]}") from e
+        # 不回显响应体：/user/cookie 等端点的错误片段可能带敏感字段，原样进群聊有泄露风险；
+        # 只保留状态码、Content-Type 与长度供排查
+        ctype = res.headers.get("Content-Type") or "未知类型"
+        length = res.headers.get("Content-Length") or "未知"
+        raise ApiError(f"返回非 JSON（HTTP {status}，{ctype}，长度 {length}）") from e
 
     result = data.get("result") if isinstance(data, dict) else None
     if result not in (None, 100, 0):

@@ -46,8 +46,8 @@ async def pick_song(service: MusicService, event: AstrMessageEvent):
             for s in lst:
                 if s.get("songmid") and s["songmid"] in mv_map:
                     s["mvVid"] = mv_map[s["songmid"]]
-        except Exception:
-            pass
+        except Exception as err:
+            service.log_info(f"song_info_batch 批量补 MV 信息失败（仅缺 MV 徽标，不影响列表）: {err}")
         scope = service.scope(event)
         await cardlib.SessionStore.set(
             service.plugin,
@@ -80,7 +80,7 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
         want_recommend = bool(m.group(1))
         n = int(m.group(2) or m.group(3) or 0)
     # 裸 #听N（无 qqm 前缀）仅由最近活跃的音乐插件响应，避免多插件同装时抢占顺序取决于加载顺序
-    if m and m.group(3) and not await service.is_session_owner():
+    if m and m.group(3) and not await service.is_session_owner(event):
         return
     # 显式写了 #qqm（group(3) 为空）却匹配不上会话时不能零响应：裸 #听N 的静默是
     # 「让位给别的音乐插件」的刻意设计，但显式前缀说明用户就是在用本插件
@@ -234,7 +234,7 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
     ):
         return
     # 裸 #听所有（无 qqm 前缀）仅由最近活跃的音乐插件响应
-    if not re.match(r"^#?(?:qq|QQ)m", event.message_str.strip(), re.IGNORECASE) and not await service.is_session_owner():
+    if not re.match(r"^#?(?:qq|QQ)m", event.message_str.strip(), re.IGNORECASE) and not await service.is_session_owner(event):
         return
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
@@ -246,6 +246,16 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
         return
     stype = session.get("type") or "pick"
     if stype in ("mvList", "topCategory", "albumList", "recommend"):
+        # 非点歌会话：显式 #qqm 前缀给提示（口径与 choose_song 一致），裸 #听所有 保持静默
+        if re.match(r"^#?(?:qq|QQ)m", event.message_str.strip(), re.IGNORECASE):
+            hints = {
+                "mvList": "当前列表是 MV，请用 #qqmMV 播放 序号",
+                "topCategory": "该会话是榜单分类，请先 #qqm排行 榜单名 查看歌曲",
+                "albumList": "该会话是专辑列表，请先 #qqm听序号 展开专辑曲目",
+                "recommend": "该会话是推荐歌单，请先 #qqm听序号 展开歌单曲目",
+            }
+            await service.reply(event, hints.get(stype, "当前会话不支持 #qqm听所有"))
+            event.stop_event()
         return
     songs = session.get("data") or []
     batch = songs[:_PLAY_ALL_LIMIT]

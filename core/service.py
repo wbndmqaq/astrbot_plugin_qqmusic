@@ -237,10 +237,10 @@ class MusicService:
 
     # ──────────── 裸 #听N 跨插件抢占 ────────────
 
-    async def is_session_owner(self) -> bool:
-        """本插件是否为最近活跃的音乐插件（供裸 #听N 抢占，标记在 SessionStore.set 写入）。"""
+    async def is_session_owner(self, event: AstrMessageEvent) -> bool:
+        """本插件是否为该会话（scope）最近活跃的音乐插件（供裸 #听N 抢占，标记在 SessionStore.set 写入）。"""
         name = str(getattr(self.plugin, "name", "") or "")
-        return await asyncio.to_thread(cardlib.is_session_owner, name)
+        return await asyncio.to_thread(cardlib.is_session_owner, name, self.scope(event))
 
     # ──────────── 基础辅助 ────────────
 
@@ -351,9 +351,9 @@ class MusicService:
 
     def scope(self, event: AstrMessageEvent) -> str:
         gid = getattr(event.message_obj, "group_id", None)
-        if gid:
-            return str(gid)
-        return event.get_sender_id()
+        # 平台前缀防止多平台 ID 撞车（同一数字在 QQ/微信是两个不同会话）。
+        # 注意：KV 会话键随之变化，旧的持久化会话一次性全部失效（重新点歌即可），可接受。
+        return f"{event.get_platform_name()}:{gid or event.get_sender_id()}"
 
     def user_key(self, event: AstrMessageEvent) -> str:
         return str(event.get_sender_id() or "")

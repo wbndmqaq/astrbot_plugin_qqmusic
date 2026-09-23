@@ -29,6 +29,8 @@ _DOWNLOAD_CHUNK_BYTES = 256 * 1024
 _DOWNLOAD_FLUSH_BYTES = 1024 * 1024
 # 小于该字节数视为无效下载 / 无效转码产物
 _MIN_VALID_BYTES = 256
+# 下载硬上限：超过即中止并删除半成品（防异常大文件/死循环链路塞满磁盘）
+_MAX_DOWNLOAD_BYTES = 1 << 30
 # 语音转码码率：体积越大码率越低，避免语音消息过大被协议端拒收
 _LARGE_AUDIO_BYTES = 16 * 1024 * 1024
 _MEDIUM_AUDIO_BYTES = 8 * 1024 * 1024
@@ -180,8 +182,11 @@ def _qq_chunked_available(cfg: dict) -> bool:
     try:
         from astrbot import __version__ as _ver
 
-        parts = [int(x) for x in str(_ver).lstrip("v").split(".")]
-        return parts[:3] >= [4, 27, 3]
+        # 取前三段数字转 int 比较：预发布号（如 4.28.1.dev0）不再被误判为旧版而保守禁用
+        nums = re.findall(r"\d+", str(_ver).lstrip("v"))
+        if len(nums) < 3:
+            return False
+        return [int(x) for x in nums[:3]] >= [4, 27, 3]
     except Exception:
         # 版本不可读时保守视为不支持，交给调用方走压缩版兜底
         return False
@@ -370,7 +375,11 @@ async def download_audio(
     }
     ext = _ext_for_quality(quality_hint, url)
     safe_name = re.sub(r"[^\w.-]", "", filename) or "qqmusic"
-    file_path = os.path.join(save_dir, f"{safe_name}_{int(time.time() * 1000)}{ext}")
+    # 随机后缀防同毫秒并发下载（连播/多会话）时文件名碰撞互相覆盖
+    file_path = os.path.join(
+        save_dir,
+        f"{safe_name}_{int(time.time() * 1000)}_{os.urandom(4).hex()}{ext}",
+    )
 
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
     size = 0
@@ -399,6 +408,9 @@ async def download_audio(
                         raise RuntimeError("下载内容为 HTML，音频链接已失效")
                     first_chunk = False
                 size += len(chunk)
+                if size > _MAX_DOWNLOAD_BYTES:
+                    # 超硬上限：中止下载，走下方既有失败路径删除半成品并抛错
+                    raise RuntimeError("下载体积超过 1GB 硬上限，已中止")
                 pending.extend(chunk)
                 if len(pending) >= _DOWNLOAD_FLUSH_BYTES:
                     await asyncio.to_thread(_append_bytes, file_path, bytes(pending))

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
 
+from astrbot.api import logger
+
 from . import messages as msg
 from .messages import HELP_SECTIONS
 from .utils import safe_int
@@ -18,48 +20,93 @@ PLUGIN_NAME = "astrbot_plugin_qqmusic"
 
 # ──────────── 裸 #听N 跨插件抢占（共享「最近活跃归属」标记） ────────────
 
+# scopes 条目上限：防长期运行后 scope 无界增长，超限按 ts 保留最新 256 个
+_OWNER_MAX_SCOPES = 256
 
-def _owner_marker_path() -> Path:
-    """三个音乐插件（网易云/酷狗/QQ）共用的「最近活跃归属」标记文件路径。
+# 写失败只告警一次的模块级标志：仲裁标记是优化项，写不进去只会退化为
+# 「谁有会话谁响应」，反复刷警告没有意义
+_OWNER_MARK_WARNED = False
 
-    必须显式传插件名：StarTools 只在调用栈位于插件主模块（main.py）时才能反查
-    插件元数据，本函数在 core/cards.py 里，不传名会抛 RuntimeError 并回退到
-    「插件自身目录」——那样三个插件各写各的，跨插件抢占就永远不生效。
-    """
+
+def _owner_marker_path() -> "Path | None":
+    """裸 #听N 跨插件仲裁标记（三音乐插件共用）。固定在 data/plugin_data/ 下；
+    取不到路径时返回 None（仲裁退化为「无主」，绝不写插件自身目录）。"""
     try:
-        from astrbot.api.star import StarTools
-
-        data_dir = StarTools.get_data_dir(PLUGIN_NAME)
-        return data_dir.parent / "_music_session_owner.json"
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+        return Path(get_astrbot_data_path()) / "plugin_data" / "_music_session_owner.json"
     except Exception:
-        return Path(__file__).resolve().parent.parent / "_music_session_owner.json"
+        return None
 
 
-def mark_session_owner(plugin_name: str) -> None:
-    """记录某插件为最近一次会话活跃的音乐插件（几十字节小文件，微秒级同步 IO）。"""
+def mark_session_owner(plugin_name: str, scope: str) -> None:
+    """记录 scope 会话最近一次活跃的音乐插件（几十字节小文件，微秒级同步 IO）。
+
+    文件格式（三音乐插件共用）：
+    ``{"version": 2, "scopes": {"<scope>": {"plugin": ..., "ts": ...}}}``；
+    读到旧版全局单键格式（无 scopes 键）一律视为无主、从空 scopes 起步覆盖。
+    """
+    global _OWNER_MARK_WARNED
+    p = _owner_marker_path()
+    if p is None:
+        return
     try:
-        p = _owner_marker_path()
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        scopes = data.get("scopes") if isinstance(data, dict) else None
+        if not isinstance(scopes, dict):
+            # 缺文件 / JSON 损坏 / 旧版格式：从空 scopes 起步
+            scopes = {}
+        scopes[scope] = {"plugin": plugin_name, "ts": int(time.time())}
+        if len(scopes) > _OWNER_MAX_SCOPES:
+            keep = sorted(
+                scopes.items(), key=lambda kv: kv[1].get("ts") or 0
+            )[-_OWNER_MAX_SCOPES:]
+            scopes = dict(keep)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(p.name + ".tmp")
+        # 临时文件名带插件专属后缀：三插件并发写同一标记时互不踩踏
+        tmp = p.with_name(f"{p.stem}.{plugin_name}.tmp")
         tmp.write_text(
-            json.dumps({"plugin": plugin_name, "ts": int(time.time())}, ensure_ascii=False),
+            json.dumps({"version": 2, "scopes": scopes}, ensure_ascii=False),
             encoding="utf-8",
         )
         os.replace(tmp, p)  # 原子替换，避免并发写坏
     except Exception:
-        pass
+        if not _OWNER_MARK_WARNED:
+            _OWNER_MARK_WARNED = True
+            logger.warning(
+                "[qqmusic] 仲裁标记写入失败，裸 #听N 跨插件抢占退化为「谁有会话谁响应」"
+            )
 
 
-def is_session_owner(plugin_name: str) -> bool:
-    """判断某插件是否为最近活跃的音乐插件（无标记时视为 True，退化为「谁有会话谁响应」）。"""
+def is_session_owner(plugin_name: str, scope: str) -> bool:
+    """判断本插件是否为 scope 会话最近活跃的音乐插件。
+
+    标记缺失 / 旧格式 / 本群无条目一律视为「无主」（谁有会话谁响应）；
+    唯独读取本身抛错时返回 False——宁可偶尔静默，不能多插件双重响应。
+    """
+    p = _owner_marker_path()
+    if p is None:
+        return False
     try:
-        p = _owner_marker_path()
-        if not p.exists():
-            return True
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data.get("plugin") == plugin_name
-    except Exception:
+        raw = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return True
+    except Exception:
+        logger.debug("[qqmusic] 仲裁标记读取失败，本次按「非主」处理")
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return True  # JSON 损坏：视为无主
+    scopes = data.get("scopes") if isinstance(data, dict) else None
+    if not isinstance(scopes, dict):
+        return True  # 旧版全局单键格式（无 scopes 键）：视为无主
+    entry = scopes.get(scope)
+    if not isinstance(entry, dict):
+        return True  # 本群/本会话尚无归属记录
+    return entry.get("plugin") == plugin_name
 
 
 # ──────────── 会话存储 ────────────
@@ -163,7 +210,7 @@ class SessionStore:
         # 标记文件写盘（mkdir + write + os.replace）是阻塞 IO，且每次会话写入都会走：
         # 与读侧 service.is_session_owner 保持一致，放线程池执行。
         await asyncio.to_thread(
-            mark_session_owner, str(getattr(plugin, "name", "") or "")
+            mark_session_owner, str(getattr(plugin, "name", "") or ""), scope
         )
         k = cls._key(scope)
         # 写盘串行化：等锁期间本次数据可能已被更新的一次写入取代（内存里 updatedAt
