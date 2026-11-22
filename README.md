@@ -4,6 +4,11 @@
 
 <h1 align="center">qqmusic-plugin</h1>
 
+> [!WARNING]
+> **⛔ 本插件已停止维护，不再接受任何功能更新与 Bug 修复。**
+> 网易云、QQ、酷狗等音乐点歌功能已整合进新的聚合插件，请前往新项目安装使用：
+> 👉 **[astrbot_plugin_music_hub](https://github.com/wbndmqaq/astrbot_plugin_music_hub)**
+
 > 从 Yunzai-Bot [qqmusic-plugin](https://github.com/zaras123/qqmusic-plugin) 移植而来的 AstrBot 版本
 
 ---
@@ -175,7 +180,8 @@ WebUI → 插件管理 → 本插件 → 重载。
 
 ## 平台适配
 
-支持平台：`aiocqhttp`、`qq_official`、`telegram`、`dingtalk`、`lark`、`kook`、`discord`、`weixin_oc`。
+完整支持平台：`aiocqhttp`、`qq_official`、`telegram`、`kook`、`discord`、`weixin_oc`。
+受限支持（仅文本，媒体通道按平台能力降级）：`dingtalk`、`lark`（钉钉/飞书适配器不支持语音/文件/视频出站，飞书图片可用）。
 
 | 平台 | 文本/图片/卡片 | 语音 | 文件 | 视频 (MV) | 原生/自定义音乐卡 |
 |---|---|---|---|---|---|
@@ -183,8 +189,8 @@ WebUI → 插件管理 → 本插件 → 重载。
 | QQ 官方 (qq_official) | ✅ | ✅（silk 转码，失败回退文件） | ✅（>10MB 自动分片上传，需 AstrBot ≥4.27.3） | ✅（落盘发送，卡片与视频合并省额度） | ❌ |
 | 微信个人号 (weixin_oc) | ✅ | ❌ | ✅ | ✅ | ❌ |
 | Telegram | ✅ | ✅ | ✅ | ✅ | ❌ |
-| 飞书 (lark) | ✅ | ✅ | ✅ | ✅ | ❌ |
-| 钉钉 (dingtalk) | ✅ | ✅ | ✅ | ✅ | ❌ |
+| 飞书 (lark) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 钉钉 (dingtalk) | ✅（图片仅 http 链接，本地卡片图不可用） | ❌ | ❌ | ❌ | ❌ |
 | KOOK | ✅ | ✅ | ✅ | ✅ | ❌ |
 | Discord | ✅ | ✅ | ✅ | ✅ | ❌ |
 
@@ -283,7 +289,7 @@ astrbot_plugin_qqmusic/
 
 <div align="center">
 
-如果觉得这个插件对你有帮助，欢迎 Star 一下哈哈
+本插件已停止维护。如果觉得新的聚合插件对你有帮助，欢迎给 [astrbot_plugin_music_hub](https://github.com/wbndmqaq/astrbot_plugin_music_hub) 点个 Star
 
 </div>
 
